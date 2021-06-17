@@ -1,5 +1,6 @@
 #include "main.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -87,6 +88,8 @@ ReadLine(FILE *File, char *Buf, umm Sz)
     Assert(Sz > 0);
     Assert(Buf);
 
+    /* TODO(lrak): what do we do if we find a \0 in our file? */
+
     char *End = Buf + Sz - 1;
     enum line_type Type = LINE_ROW;
 
@@ -118,6 +121,83 @@ ReadLine(FILE *File, char *Buf, umm Sz)
 }
 
 
+enum token_type {
+    TOKEN_NONE = 0,
+
+    TOKEN_STATIC_CELL,
+    TOKEN_EXPR_CELL,
+
+    TOKEN_IDENT,
+};
+
+struct row_lexer {
+    char *Cur;
+};
+
+static enum token_type
+NextRowToken(struct row_lexer *State, char *Buf, umm Sz)
+{
+    Assert(State);
+    Assert(Buf);
+    Assert(Sz > 0);
+
+    enum token_type Type = TOKEN_STATIC_CELL;
+    char *End = Buf + Sz - 1;
+
+    switch (*State->Cur) {
+    case 0:
+        Type = TOKEN_NONE;
+        break;
+
+    case '\t':
+        ++State->Cur;
+        if (*State->Cur == '=') {
+            fallthrough;
+    case '=':
+            Type = TOKEN_EXPR_CELL;
+            ++State->Cur;
+        }
+        fallthrough;
+    default:
+        while (*State->Cur && *State->Cur != '\t') {
+            if (Buf < End) *Buf++ = *State->Cur;
+            ++State->Cur;
+        }
+        break;
+    }
+
+    *Buf = 0;
+    return Type;
+}
+
+struct cmd_lexer {
+    char *Cur;
+};
+
+static enum token_type
+NextCmdToken(struct cmd_lexer *State, char *Buf, umm Sz)
+{
+    Assert(State);
+    Assert(Buf);
+    Assert(Sz > 0);
+
+    enum token_type Type = TOKEN_NONE;
+    char *End = Buf + Sz - 1;
+
+    if (*State->Cur) {
+        Type = TOKEN_IDENT;
+        while (isspace(*State->Cur)) ++State->Cur;
+        while (*State->Cur && !isspace(*State->Cur)) {
+            if (Buf < End) *Buf++ = *State->Cur;
+            ++State->Cur;
+        }
+    }
+
+    *Buf = 0;
+    return Type;
+}
+
+
 s32
 main(s32 ArgCount, char **Args)
 {
@@ -129,19 +209,53 @@ main(s32 ArgCount, char **Args)
         }
         else {
             char Line[1024];
-            enum line_type Type;
+            enum line_type LineType;
 
-            while ((Type = ReadLine(File, Line, sizeof Line))) {
-                char *Fmt;
-                switch (Type) {
-                case LINE_NONE:    Fmt = "NONE\n"; break;
-                case LINE_EMPTY:   Fmt = "EMPTY\n"; break;
-                case LINE_ROW:     Fmt = "[%.*s]\n"; break;
-                case LINE_COMMAND: Fmt = "(%.*s)\n"; break;
-                case LINE_COMMENT: Fmt = "#%.*s\n"; break;
-                default: Fmt = "UNKNOWN.%.*s\n"; break;
+            while ((LineType = ReadLine(File, Line, sizeof Line))) {
+                char *Prefix = "UNK";
+                switch (LineType) {
+                case LINE_NONE:    Prefix = "000"; break;
+                case LINE_EMPTY:   Prefix = "NUL"; break;
+                case LINE_ROW:     Prefix = "ROW"; break;
+                case LINE_COMMAND: Prefix = "COM"; break;
+                case LINE_COMMENT: Prefix = "REM"; break;
                 }
-                printf(Fmt, (s32)sizeof Line, Line);
+
+                printf("%s.", Prefix);
+                switch (LineType) {
+                case LINE_ROW: {
+                    char Buf[512];
+                    enum token_type Type;
+                    struct row_lexer Lexer = { Line };
+
+                    while ((Type = NextRowToken(&Lexer, Buf, sizeof Buf))) {
+                        switch (Type) {
+                        case TOKEN_STATIC_CELL: printf("[%s]", Buf); break;
+                        case TOKEN_EXPR_CELL: printf("{%s}", Buf); break;
+                        InvalidDefaultCase;
+                        }
+                    }
+                } break;
+
+                case LINE_COMMAND: {
+                    char Buf[512];
+                    enum token_type Type;
+                    struct cmd_lexer Lexer = { Line };
+
+                    while ((Type = NextCmdToken(&Lexer, Buf, sizeof Buf))) {
+                        switch (Type) {
+                        case TOKEN_IDENT:
+                            printf("(%s)", Buf);
+                            break;
+                        InvalidDefaultCase;
+                        }
+                    }
+                } break;
+
+                case LINE_COMMENT: printf("%s", Line); break;
+                default: break;
+                }
+                printf("\n");
             }
 
             fclose(File);
