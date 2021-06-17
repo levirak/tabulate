@@ -1,0 +1,13 @@
+#root
+/.exrc
+/tags
+
+#bin
+
+#build
+/build
+
+#tests
+/tests/*
+!*.[ch]
+!*.sh
