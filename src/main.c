@@ -8,10 +8,21 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
 
+#define PREPRINT 1
+#define OVERDRAW_ROW 1
+#define OVERDRAW_COL 1
+
+#define OVERDRAW (OVERDRAW_COL || OVERDRAW_ROW)
+
+#define DEFAULT_CELL_WIDTH 16
+#define MIN_CELL_WIDTH 4
+#define SEPERATOR "  "
+
 enum line_type {
-    LINE_NONE = 0,
+    LINE_NULL = 0,
     LINE_ROW,
     LINE_EMPTY,
     LINE_COMMENT,
@@ -27,12 +38,12 @@ ReadLine(FILE *File, char *Buf, umm Sz)
 
     /* TODO(lrak): what do we do if we find a \0 in our file? */
 
-    char *End = Buf + Sz - 1;
+    char *End = Buf + Sz - 2;
     enum line_type Type = LINE_ROW;
 
     s32 Char = fgetc(File);
     switch (Char) {
-    case EOF: Type = LINE_NONE; break;
+    case EOF: Type = LINE_NULL; break;
     case '\n': Type = LINE_EMPTY; break;
     case '#':
         Char = fgetc(File);
@@ -49,6 +60,7 @@ ReadLine(FILE *File, char *Buf, umm Sz)
             if (Buf < End) *Buf++ = Char;
             Char = fgetc(File);
         }
+        *Buf++ = '\n';
         break;
     }
 
@@ -58,47 +70,45 @@ ReadLine(FILE *File, char *Buf, umm Sz)
 }
 
 
-enum token_type {
-    TOKEN_NONE = 0,
-
-    TOKEN_STATIC_CELL,
-    TOKEN_EXPR_CELL,
-
-    TOKEN_IDENT,
+enum cell_type {
+    CELL_NULL = 0,
+    CELL_STRING,
+    CELL_EXPR,
 };
 
 struct row_lexer {
     char *Cur;
 };
 
-static enum token_type
+static enum cell_type
 NextCell(struct row_lexer *State, char *Buf, umm Sz)
 {
     Assert(State);
     Assert(Buf);
     Assert(Sz > 0);
 
-    enum token_type Type = TOKEN_STATIC_CELL;
+    enum cell_type Type = CELL_STRING;
     char *End = Buf + Sz - 1;
 
     switch (*State->Cur) {
     case 0:
-        Type = TOKEN_NONE;
+        Type = CELL_NULL;
         break;
 
-    case '\t':
-        ++State->Cur;
-        if (*State->Cur == '=') {
-            fallthrough;
     case '=':
-            Type = TOKEN_EXPR_CELL;
-            ++State->Cur;
-        }
+        Type = CELL_EXPR;
+        ++State->Cur;
         fallthrough;
     default:
-        while (*State->Cur && *State->Cur != '\t') {
-            if (Buf < End) *Buf++ = *State->Cur;
-            ++State->Cur;
+        while (*State->Cur) {
+            if (*State->Cur == '\t' || *State->Cur == '\n') {
+                ++State->Cur;
+                break;
+            }
+            else {
+                if (Buf < End) *Buf++ = *State->Cur;
+                ++State->Cur;
+            }
         }
         break;
     }
@@ -106,6 +116,11 @@ NextCell(struct row_lexer *State, char *Buf, umm Sz)
     *Buf = 0;
     return Type;
 }
+
+enum token_type {
+    TOKEN_NULL = 0,
+    TOKEN_IDENT,
+};
 
 struct cmd_lexer {
     char *Cur;
@@ -118,12 +133,12 @@ NextCmdToken(struct cmd_lexer *State, char *Buf, umm Sz)
     Assert(Buf);
     Assert(Sz > 0);
 
-    enum token_type Type = TOKEN_NONE;
+    enum token_type Type = TOKEN_NULL;
     char *End = Buf + Sz - 1;
 
+    while (isspace(*State->Cur)) ++State->Cur;
     if (*State->Cur) {
         Type = TOKEN_IDENT;
-        while (isspace(*State->Cur)) ++State->Cur;
         while (*State->Cur && !isspace(*State->Cur)) {
             if (Buf < End) *Buf++ = *State->Cur;
             ++State->Cur;
@@ -136,70 +151,154 @@ NextCmdToken(struct cmd_lexer *State, char *Buf, umm Sz)
 
 
 struct cell {
-    enum token_type Type;
+    enum cell_type Type: 8;
+    s8 Width;
     char Str[32]; /* TODO(lrak): dynamic */
 };
 
 struct document {
-    s32 NumCol, MaxCol;
-    s32 NumRow, MaxRow;
-    struct cell *Cells;
+    s32 Cols, Rows;
+    struct doc_cells {
+        s32 Cols, Rows;
+        struct cell *Cells;
+    } Table;
 
     s32 FirstBodyRow;
     s32 FirstFootRow;
 };
 
+static s32
+GetCellIdx(struct doc_cells *Table, s32 Col, s32 Row)
+{
+    return Row + Col*Table->Rows;
+}
+
 static struct cell *
-GetCell(struct document *Doc, s32 Col, s32 Row)
+GetCell(struct doc_cells *Table, s32 Col, s32 Row)
+{
+    return Table->Cells + GetCellIdx(Table, Col, Row);
+}
+
+#if OVERDRAW_ROW
+# define FOREACH_ROW(D,I) for (s32 _END = (D)->Table.Rows, I = 0; I < _END; ++I)
+#else
+# define FOREACH_ROW(D,I) for (s32 _END = (D)->Rows, I = 0; I < _END; ++I)
+#endif
+
+#if OVERDRAW_COL
+# define FOREACH_COL(D,I) for (s32 _END = (D)->Table.Cols, I = 0; I < _END; ++I)
+#else
+# define FOREACH_COL(D,I) for (s32 _END = (D)->Cols, I = 0; I < _END; ++I)
+#endif
+
+static struct cell *
+GetAndReserveCell(struct document *Doc, s32 Col, s32 Row)
 {
     Assert(Doc);
     Assert(Col >= 0);
     Assert(Row >= 0);
 
-    if (Col >= Doc->MaxCol || Row >= Doc->MaxRow) {
+    if (Col >= Doc->Table.Cols || Row >= Doc->Table.Rows) {
         /* resize */
-        smm NewMaxCol = MAX(Doc->MaxCol, 8);
-        smm NewMaxRow = MAX(Doc->MaxRow, 8);
-        while (Col > NewMaxCol) NewMaxCol *= 2;
-        while (Row > NewMaxRow) NewMaxRow *= 2;
+        struct doc_cells New = {
+            .Cols = Max3(Doc->Table.Cols, NextPow2(Col+1), 8),
+            .Rows = Max3(Doc->Table.Rows, NextPow2(Row+1), 8),
+        };
 
-        umm NewSize = sizeof *Doc->Cells * NewMaxCol * NewMaxRow;
-        struct cell *NewCells = malloc(NewSize);
-        memset(NewCells, 0, NewSize);
+        umm NewSize = sizeof *New.Cells * New.Cols * New.Rows;
+        New.Cells = malloc(NewSize);
+        memset(New.Cells, 0, NewSize);
 
-        if (Doc->Cells) {
-            for (s32 ColIdx = 0; ColIdx < Doc->NumCol; ++ColIdx) {
-                for (s32 RowIdx = 0; RowIdx < Doc->NumRow; ++RowIdx) {
-                    s32 Idx = Col + Row*Doc->MaxCol;
-                    NewCells[Idx] = Doc->Cells[Idx];
+        if (Doc->Table.Cells) {
+            for (s32 ColIdx = 0; ColIdx < Doc->Cols; ++ColIdx) {
+                for (s32 RowIdx = 0; RowIdx < Doc->Rows; ++RowIdx) {
+                    s32 NewIdx = GetCellIdx(&New, ColIdx, RowIdx);
+                    s32 OldIdx = GetCellIdx(&Doc->Table, ColIdx, RowIdx);
+                    New.Cells[NewIdx] = Doc->Table.Cells[OldIdx];
                 }
             }
+            free(Doc->Table.Cells);
         }
 
-        Doc->Cells = NewCells;
-        Doc->MaxCol = NewMaxCol;
-        Doc->MaxRow = NewMaxRow;
+        Doc->Table = New;
     }
 
-    Doc->NumCol = MAX(Doc->NumCol, Col+1);
-    Doc->NumRow = MAX(Doc->NumRow, Row+1);
-    Assert(Doc->NumCol <= Doc->MaxCol);
-    Assert(Doc->NumRow <= Doc->MaxRow);
+    Doc->Cols = Max(Doc->Cols, Col+1);
+    Doc->Rows = Max(Doc->Rows, Row+1);
 
-    Assert(Doc->Cells);
-    return Doc->Cells + (Col + Row*Doc->MaxCol);
+    Assert(Doc->Cols <= Doc->Table.Cols);
+    Assert(Doc->Rows <= Doc->Table.Rows);
+    Assert(Doc->Table.Cells);
+    return GetCell(&Doc->Table, Col, Row);
 }
 
 static void
 PrintDocument(struct document *Doc)
 {
     Assert(Doc);
-    for (s32 Row = 0; Row < Doc->NumRow; ++Row) {
-        if (Row == Doc->FirstBodyRow) printf(" ↑head body↓\n");
-        if (Row == Doc->FirstFootRow) printf(" ↑body foot↓\n");
-        for (s32 Col = 0; Col < Doc->NumCol; ++Col) {
-            struct cell *Cell = Doc->Cells + (Col + Row*Doc->MaxCol);
-            printf("[%.*s]", (s32)sizeof Cell->Str, Cell->Str);
+
+    FOREACH_COL(Doc, Col) {
+        s32 Width = MIN_CELL_WIDTH;
+        FOREACH_ROW(Doc, Row) {
+            struct cell *Cell = GetCell(&Doc->Table, Col, Row);
+            Width = Max(Width, strlen(Cell->Str));
+        }
+
+        FOREACH_ROW(Doc, Row) {
+            struct cell *Cell = GetCell(&Doc->Table, Col, Row);
+            Cell->Width = Width;
+        }
+    }
+
+    FOREACH_ROW(Doc, Row) {
+        if (Row == Doc->FirstBodyRow || Row == Doc->FirstFootRow) {
+#if OVERDRAW
+            FOREACH_COL(Doc, Col) {
+                struct cell *Cell = GetCell(&Doc->Table, Col, Row);
+                putchar('.');
+                for (s32 It = 0; It < Cell->Width; ++It) putchar('-');
+                putchar('.');
+            }
+#else
+            FOREACH_COL(Doc, Col) {
+                struct cell *Cell = GetCell(&Doc->Table, Col, Row);
+                for (s32 It = 0; It < Cell->Width; ++It) putchar('-');
+                if (Col != _END - 1) printf("%s", SEPERATOR);
+            }
+#endif
+            putchar('\n');
+        }
+
+        FOREACH_COL(Doc, Col) {
+            struct cell *Cell = GetCell(&Doc->Table, Col, Row);
+#if OVERDRAW
+            switch (Cell->Type) {
+            case CELL_STRING:
+                printf("[%-*s]", Cell->Width, Cell->Str);
+                break;
+            case CELL_EXPR:
+                printf("{%-*s}", Cell->Width, Cell->Str);
+                break;
+            case CELL_NULL:
+                putchar('<');
+                for (s32 It = 0; It < Cell->Width; ++It) putchar('\\');
+                putchar('>');
+                break;
+            }
+#else
+            switch (Cell->Type) {
+            case CELL_STRING:
+                printf("%-*s", Cell->Width, Cell->Str);
+                break;
+            case CELL_EXPR:
+                printf("%-*s", Cell->Width, Cell->Str);
+                break;
+            case CELL_NULL:
+                for (s32 It = 0; It < Cell->Width; ++It) putchar('X');
+                break;
+            }
+            if (Col != _END - 1) printf(SEPERATOR);
+#endif
         }
         printf("\n");
     }
@@ -228,6 +327,7 @@ MakeDocument(char *Path)
 
         umm RowIdx = 0;
         while ((LineType = ReadLine(File, Line, sizeof Line))) {
+#if PREPRINT
             char *Prefix = "UNK";
             switch (LineType) {
             case LINE_EMPTY:   Prefix = "NUL"; break;
@@ -236,8 +336,9 @@ MakeDocument(char *Path)
             case LINE_COMMENT: Prefix = "REM"; break;
             InvalidDefaultCase;
             }
-
             printf("%s.", Prefix);
+#endif
+
             switch (LineType) {
             case LINE_EMPTY:
                 if (Doc->FirstBodyRow == 0) {
@@ -250,19 +351,21 @@ MakeDocument(char *Path)
 
             case LINE_ROW: {
                 char Buf[512];
-                enum token_type Type;
+                enum cell_type Type;
                 struct row_lexer Lexer = { Line };
 
                 umm ColIdx = 0;
                 while ((Type = NextCell(&Lexer, Buf, sizeof Buf))) {
+#if PREPRINT
                     switch (Type) {
-                    case TOKEN_STATIC_CELL: printf("[%s]", Buf); break;
-                    case TOKEN_EXPR_CELL: printf("{%s}", Buf); break;
+                    case CELL_STRING: printf("[%s]", Buf); break;
+                    case CELL_EXPR: printf("{%s}", Buf); break;
                     InvalidDefaultCase;
                     }
+#endif
 
                     struct cell *Cell;
-                    NotNull(Cell = GetCell(Doc, ColIdx, RowIdx));
+                    NotNull(Cell = GetAndReserveCell(Doc, ColIdx, RowIdx));
                     Cell->Type = Type;
                     strncpy(Cell->Str, Buf, sizeof Cell->Str);
                     ++ColIdx;
@@ -276,20 +379,35 @@ MakeDocument(char *Path)
                 struct cmd_lexer Lexer = { Line };
 
                 while ((Type = NextCmdToken(&Lexer, Buf, sizeof Buf))) {
+#if PREPRINT
                     switch (Type) {
                     case TOKEN_IDENT:
                         printf("(%s)", Buf);
                         break;
                     InvalidDefaultCase;
                     }
+#endif
                 }
             } break;
 
-            case LINE_COMMENT: printf("%s", Line); break;
+#if PREPRINT
+            case LINE_COMMENT: {
+                char *Cur = Line;
+                while (*Cur && *Cur != '\n') ++Cur;
+                *Cur = 0;
+                printf("%s", Line);
+            } break;
+
+#endif
             default: break;
             }
+#if PREPRINT
             printf("\n");
+#endif
         }
+#if PREPRINT
+        printf("\n");
+#endif
 
         fclose(File);
     }
@@ -301,7 +419,7 @@ static void
 DeleteDocument(struct document *Doc)
 {
     if (Doc) {
-        free(Doc->Cells);
+        free(Doc->Table.Cells);
         free(Doc);
     }
 }
@@ -314,9 +432,9 @@ main(s32 ArgCount, char **Args)
         char *Path = Args[Idx];
         struct document *Doc = MakeDocument(Path);
 
-        printf("\n%s:\n", Path);
-        printf("%dx%d ", Doc->NumCol, Doc->NumRow);
-        printf("(%dx%d)\n", Doc->MaxCol, Doc->MaxRow);
+        if (Idx != 1) putchar('\n');
+        printf("%s: %dx%d (%dx%d)\n", Path, Doc->Cols, Doc->Rows,
+                Doc->Table.Cols, Doc->Table.Rows);
         PrintDocument(Doc);
         DeleteDocument(Doc);
     }
