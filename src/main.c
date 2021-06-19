@@ -13,11 +13,12 @@
 
 #define PREPRINT 1
 #define OVERDRAW_ROW 1
-#define OVERDRAW_COL 1
+#define OVERDRAW_COL 0
 
 #define OVERDRAW (OVERDRAW_COL || OVERDRAW_ROW)
 
-#define DEFAULT_CELL_WIDTH 16
+#define DEFAULT_CELL_PRECISION 2
+#define DEFAULT_CELL_WIDTH 4
 #define MIN_CELL_WIDTH 4
 #define SEPERATOR "  "
 
@@ -150,9 +151,17 @@ NextCmdToken(struct cmd_lexer *State, char *Buf, umm Sz)
 }
 
 
+enum cell_alignment {
+    ALIGN_DEFAULT = 0,
+    ALIGN_RIGHT,
+    ALIGN_LEFT,
+};
+
 struct cell {
     enum cell_type Type: 8;
-    s8 Width;
+    enum cell_alignment Align: 8;
+    u8 Width;
+    u8 Precision;
     char Str[32]; /* TODO(lrak): dynamic */
 };
 
@@ -238,11 +247,8 @@ PrintDocument(struct document *Doc)
     Assert(Doc);
 
     FOREACH_COL(Doc, Col) {
-        s32 Width = MIN_CELL_WIDTH;
-        FOREACH_ROW(Doc, Row) {
-            struct cell *Cell = GetCell(&Doc->Table, Col, Row);
-            Width = Max(Width, strlen(Cell->Str));
-        }
+        s32 Width = GetCell(&Doc->Table, Col, 0)->Width;
+        Width = Max(Width? Width: DEFAULT_CELL_WIDTH, MIN_CELL_WIDTH);
 
         FOREACH_ROW(Doc, Row) {
             struct cell *Cell = GetCell(&Doc->Table, Col, Row);
@@ -378,15 +384,65 @@ MakeDocument(char *Path)
                 enum token_type Type;
                 struct cmd_lexer Lexer = { Line };
 
+                enum {
+                    STATE_FIRST = 0,
+                    STATE_FMT,
+                    STATE_ERROR,
+                } State = 0;
+
+                s32 ArgPos = 0;
                 while ((Type = NextCmdToken(&Lexer, Buf, sizeof Buf))) {
 #if PREPRINT
-                    switch (Type) {
-                    case TOKEN_IDENT:
-                        printf("(%s)", Buf);
-                        break;
-                    InvalidDefaultCase;
-                    }
+                    printf("(%s)", Buf);
 #endif
+
+                    switch (State) {
+                    case STATE_FIRST: {
+                        if (0);
+                        else if (strcmp(Buf, "fmt") == 0) {
+                            State = STATE_FMT;
+                        }
+                        else State = STATE_ERROR;
+                    } break;
+
+                    case STATE_FMT: {
+                        struct cell *TopCell;
+                        enum cell_alignment Align = 0;
+                        u8 Width = DEFAULT_CELL_WIDTH;
+                        u8 Precision = DEFAULT_CELL_PRECISION;
+                        char *Cur = Buf;
+
+                        /* TODO(lrak): real parser */
+
+                        if (0);
+                        else if (*Cur == 'l') { ++Cur; Align = ALIGN_LEFT; }
+                        else if (*Cur == 'r') { ++Cur; Align = ALIGN_RIGHT; }
+
+                        if (isdigit(*Cur)) {
+                            Width = 0;
+                            do Width = 10*Width + (*Cur++ - '0');
+                            while (isdigit(*Cur));
+                        }
+
+                        if (*Cur == '.') {
+                            ++Cur;
+                            if (isdigit(*Cur)) {
+                                Precision = 0;
+                                do Precision = 10*Precision + (*Cur++ - '0');
+                                while (isdigit(*Cur));
+                            }
+                        }
+
+                        TopCell = GetCell(&Doc->Table, ArgPos-1, 0);
+                        TopCell->Align = Align;
+                        TopCell->Width = Width;
+                        TopCell->Precision = Precision;
+                    } break;
+
+                    default: State = STATE_ERROR; break;
+                    }
+
+                    ++ArgPos;
                 }
             } break;
 
