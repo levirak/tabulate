@@ -1,26 +1,32 @@
 #include "main.h"
 
 #include "logging.h"
+#include "util.h"
 
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <locale.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 #define PREPRINT 1
+#define BRACKET_CELLS 0
 #define OVERDRAW_ROW 1
-#define OVERDRAW_COL 0
-
-#define OVERDRAW (OVERDRAW_COL || OVERDRAW_ROW)
+#define OVERDRAW_COL 1
 
 #define DEFAULT_CELL_PRECISION 2
 #define DEFAULT_CELL_WIDTH 4
 #define MIN_CELL_WIDTH 4
+#define INIT_ROW_COUNT 16
+#define INIT_COL_COUNT 8
 #define SEPERATOR "  "
+
+#define BRACKETED (BRACKET_CELLS || OVERDRAW_COL || OVERDRAW_ROW)
+
 
 enum line_type {
     LINE_NULL = 0,
@@ -73,8 +79,11 @@ ReadLine(FILE *File, char *Buf, umm Sz)
 
 enum cell_type {
     CELL_NULL = 0,
-    CELL_STRING,
+    CELL_UNTYPED,
     CELL_EXPR,
+
+    CELL_STRING,
+    CELL_NUMBER,
 };
 
 struct row_lexer {
@@ -88,7 +97,7 @@ NextCell(struct row_lexer *State, char *Buf, umm Sz)
     Assert(Buf);
     Assert(Sz > 0);
 
-    enum cell_type Type = CELL_STRING;
+    enum cell_type Type = CELL_UNTYPED;
     char *End = Buf + Sz - 1;
 
     switch (*State->Cur) {
@@ -158,11 +167,14 @@ enum cell_alignment {
 };
 
 struct cell {
-    enum cell_type Type: 8;
     enum cell_alignment Align: 8;
     u8 Width;
     u8 Precision;
-    char Str[32]; /* TODO(lrak): dynamic */
+    enum cell_type Type: 8;
+    union {
+        char AsStr[32]; /* TODO(lrak): dynamic */
+        f64 AsNum;
+    };
 };
 
 struct document {
@@ -210,8 +222,8 @@ GetAndReserveCell(struct document *Doc, s32 Col, s32 Row)
     if (Col >= Doc->Table.Cols || Row >= Doc->Table.Rows) {
         /* resize */
         struct doc_cells New = {
-            .Cols = Max3(Doc->Table.Cols, NextPow2(Col+1), 8),
-            .Rows = Max3(Doc->Table.Rows, NextPow2(Row+1), 8),
+            .Cols = Max3(Doc->Table.Cols, NextPow2(Col+1), INIT_COL_COUNT),
+            .Rows = Max3(Doc->Table.Rows, NextPow2(Row+1), INIT_ROW_COUNT),
         };
 
         umm NewSize = sizeof *New.Cells * New.Cols * New.Rows;
@@ -248,17 +260,19 @@ PrintDocument(struct document *Doc)
 
     FOREACH_COL(Doc, Col) {
         s32 Width = GetCell(&Doc->Table, Col, 0)->Width;
-        Width = Max(Width? Width: DEFAULT_CELL_WIDTH, MIN_CELL_WIDTH);
+        Width = Max(Width ?: DEFAULT_CELL_WIDTH, MIN_CELL_WIDTH);
+        s32 Precision = GetCell(&Doc->Table, Col, 0)->Precision;
 
         FOREACH_ROW(Doc, Row) {
             struct cell *Cell = GetCell(&Doc->Table, Col, Row);
             Cell->Width = Width;
+            Cell->Precision = Precision;
         }
     }
 
     FOREACH_ROW(Doc, Row) {
         if (Row == Doc->FirstBodyRow || Row == Doc->FirstFootRow) {
-#if OVERDRAW
+#if BRACKETED
             FOREACH_COL(Doc, Col) {
                 struct cell *Cell = GetCell(&Doc->Table, Col, Row);
                 putchar('.');
@@ -277,31 +291,39 @@ PrintDocument(struct document *Doc)
 
         FOREACH_COL(Doc, Col) {
             struct cell *Cell = GetCell(&Doc->Table, Col, Row);
-#if OVERDRAW
+#if BRACKETED
             switch (Cell->Type) {
             case CELL_STRING:
-                printf("[%-*s]", Cell->Width, Cell->Str);
+                printf("[%-*s]", Cell->Width, Cell->AsStr);
+                break;
+            case CELL_NUMBER:
+                printf("(%'*.*f)", Cell->Width, Cell->Precision, Cell->AsNum);
                 break;
             case CELL_EXPR:
-                printf("{%-*s}", Cell->Width, Cell->Str);
+                printf("{%-*s}", Cell->Width, Cell->AsStr);
                 break;
             case CELL_NULL:
                 putchar('<');
                 for (s32 It = 0; It < Cell->Width; ++It) putchar('\\');
                 putchar('>');
                 break;
+            InvalidDefaultCase;
             }
 #else
             switch (Cell->Type) {
             case CELL_STRING:
-                printf("%-*s", Cell->Width, Cell->Str);
+                printf("%-*s", Cell->Width, Cell->AsStr);
+                break;
+            case CELL_NUMBER:
+                printf("%'*.*f", Cell->Width, Cell->Precision, Cell->AsNum);
                 break;
             case CELL_EXPR:
-                printf("%-*s", Cell->Width, Cell->Str);
+                printf("%-*s", Cell->Width, Cell->AsStr);
                 break;
             case CELL_NULL:
                 for (s32 It = 0; It < Cell->Width; ++It) putchar('X');
                 break;
+            InvalidDefaultCase;
             }
             if (Col != _END - 1) printf(SEPERATOR);
 #endif
@@ -364,7 +386,7 @@ MakeDocument(char *Path)
                 while ((Type = NextCell(&Lexer, Buf, sizeof Buf))) {
 #if PREPRINT
                     switch (Type) {
-                    case CELL_STRING: printf("[%s]", Buf); break;
+                    case CELL_UNTYPED: printf("[%s]", Buf); break;
                     case CELL_EXPR: printf("{%s}", Buf); break;
                     InvalidDefaultCase;
                     }
@@ -372,8 +394,25 @@ MakeDocument(char *Path)
 
                     struct cell *Cell;
                     NotNull(Cell = GetAndReserveCell(Doc, ColIdx, RowIdx));
-                    Cell->Type = Type;
-                    strncpy(Cell->Str, Buf, sizeof Cell->Str);
+                    switch (Type) {
+                        char *Rem; double Value;
+                    case CELL_UNTYPED:
+                        if ((Value = Str2f64(Buf, &Rem)), *Rem == 0) {
+                            Cell->Type = CELL_NUMBER;
+                            Cell->AsNum = Value;
+                        }
+                        else {
+                            Cell->Type = CELL_STRING;
+                            strncpy(Cell->AsStr, Buf, sizeof Cell->AsStr);
+                        }
+                        break;
+                    case CELL_EXPR:
+                        Cell->Type = Type;
+                        strncpy(Cell->AsStr, Buf, sizeof Cell->AsStr);
+                        break;
+                    InvalidDefaultCase;
+                    }
+
                     ++ColIdx;
                 }
                 ++RowIdx;
@@ -484,6 +523,9 @@ DeleteDocument(struct document *Doc)
 s32
 main(s32 ArgCount, char **Args)
 {
+    /* NOTE: this call will get glibc to set all locals from the environment */
+    setlocale(LC_ALL, "");
+
     for (s32 Idx = 1; Idx < ArgCount; ++Idx) {
         char *Path = Args[Idx];
         struct document *Doc = MakeDocument(Path);

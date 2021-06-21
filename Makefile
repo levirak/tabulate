@@ -21,10 +21,10 @@ deps    = $(patsubst $(source_dir)/%.c,$(build_dir)/%$d,$(sources))
 target  = $(build_dir)/$(program_name)$e
 
 # The Target Build
-all: CFLAGS = -g -Og -Wall -Wextra -Wpedantic $(base_CFLAGS) -fsanitize=address,undefined,leak
+all: CFLAGS = -g -Og -Wall -Wextra $(base_CFLAGS) -fsanitize=address,undefined,leak
 all: $(target)
 
-debug: CFLAGS = -g -Wall -Wextra -Wpedantic $(base_CFLAGS) -fsanitize=address,undefined,leak
+debug: CFLAGS = -g -Wall -Wextra $(base_CFLAGS) -fsanitize=address,undefined,leak
 debug: $(target)
 
 release: CFLAGS = -O2 -Wall -Wextra -DNDEBUG $(base_CFLAGS)
@@ -47,10 +47,25 @@ $(objects): %$o: # dependencies provided by deps
 	@$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $< $(LDFLAGS) $(LDLIBS)
 
 
+test_sourcs = $(wildcard tests/*_tests.c)
+tests       = $(patsubst %.c,%,$(test_sourcs))
+
+$(tests): %: %.c $(filter-out $(build_dir)/main$o,$(objects))
+	@echo "  CC    $@"
+	@mkdir -p $(dir $@)
+	@$(CC) $(CFLAGS) -iquote $(source_dir) -o $@ $^ $(LDFLAGS) $(LDLIBS)
+
+.PHONY: tests
+tests: $(tests)
+	@sh ./tests/runtests.sh
+
+
 .PHONY: clean cleaner
 clean:
 	@echo "  RM    $(build_dir)"
 	@rm -rf $(build_dir)
+	@echo "  RM    $(tests)"
+	@rm -rf $(tests)
 
 cleaner: clean
 	@echo "  RM    tags"
