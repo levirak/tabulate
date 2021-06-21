@@ -24,7 +24,7 @@ target  = $(build_dir)/$(program_name)$e
 all: CFLAGS = -g -Og -Wall -Wextra $(base_CFLAGS) -fsanitize=address,undefined,leak
 all: $(target)
 
-debug: CFLAGS = -g -Wall -Wextra $(base_CFLAGS) -fsanitize=address,undefined,leak
+debug: CFLAGS = -g -Wall -Wextra $(base_CFLAGS)
 debug: $(target)
 
 release: CFLAGS = -O2 -Wall -Wextra -DNDEBUG $(base_CFLAGS)

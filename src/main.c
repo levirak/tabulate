@@ -1,6 +1,7 @@
 #include "main.h"
 
 #include "logging.h"
+#include "mem.h"
 #include "util.h"
 
 #include <ctype.h>
@@ -172,7 +173,8 @@ struct cell {
     u8 Precision;
     enum cell_type Type: 8;
     union {
-        char AsStr[32]; /* TODO(lrak): dynamic */
+        char *AsStr;
+        char *AsExpr;
         f64 AsNum;
     };
 };
@@ -300,7 +302,7 @@ PrintDocument(struct document *Doc)
                 printf("(%'*.*f)", Cell->Width, Cell->Precision, Cell->AsNum);
                 break;
             case CELL_EXPR:
-                printf("{%-*s}", Cell->Width, Cell->AsStr);
+                printf("{%-*s}", Cell->Width, Cell->AsExpr);
                 break;
             case CELL_NULL:
                 putchar('<');
@@ -321,7 +323,7 @@ PrintDocument(struct document *Doc)
                 printf("%-*s", Cell->Width, Cell->AsStr);
                 break;
             case CELL_NULL:
-                for (s32 It = 0; It < Cell->Width; ++It) putchar('X');
+                for (s32 It = 0; It < Cell->Width; ++It) putchar(' ');
                 break;
             InvalidDefaultCase;
             }
@@ -403,12 +405,12 @@ MakeDocument(char *Path)
                         }
                         else {
                             Cell->Type = CELL_STRING;
-                            strncpy(Cell->AsStr, Buf, sizeof Cell->AsStr);
+                            Cell->AsStr = SaveStr(Buf, sizeof Buf);
                         }
                         break;
                     case CELL_EXPR:
-                        Cell->Type = Type;
-                        strncpy(Cell->AsStr, Buf, sizeof Cell->AsStr);
+                        Cell->Type = CELL_EXPR;
+                        Cell->AsExpr = SaveStr(Buf, sizeof Buf);
                         break;
                     InvalidDefaultCase;
                     }
@@ -528,6 +530,7 @@ main(s32 ArgCount, char **Args)
 
     for (s32 Idx = 1; Idx < ArgCount; ++Idx) {
         char *Path = Args[Idx];
+
         struct document *Doc = MakeDocument(Path);
 
         if (Idx != 1) putchar('\n');
@@ -535,7 +538,11 @@ main(s32 ArgCount, char **Args)
                 Doc->Table.Cols, Doc->Table.Rows);
         PrintDocument(Doc);
         DeleteDocument(Doc);
+        /*ReleaseStrMem();*/
     }
+
+    ReleaseStrMem();
+    /*PrintStrMemInfo();*/
 
     return 0;
 }

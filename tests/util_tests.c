@@ -309,10 +309,8 @@ char *TestStr2f64(char *Str, f64 ExpectedRet, char ExpectedRhs)
                 Str, CleanChar(ExpectedRhs), CleanChar(Actual));
         Msg = _MsgBuf;
     }
-    else {
-    }
 
-    return Msg;;
+    return Msg;
 }
 
 char *string_to_f64()
