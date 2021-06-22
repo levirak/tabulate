@@ -41,8 +41,8 @@ static enum line_type
 ReadLine(FILE *File, char *Buf, umm Sz)
 {
     Assert(File);
-    Assert(Sz > 0);
     Assert(Buf);
+    Assert(Sz > 0);
 
     /* TODO(lrak): what do we do if we find a \0 in our file? */
 
@@ -128,28 +128,28 @@ NextCell(struct row_lexer *State, char *Buf, umm Sz)
     return Type;
 }
 
-enum token_type {
-    TOKEN_NULL = 0,
-    TOKEN_IDENT,
+enum cmd_token {
+    CT_NULL = 0,
+    CT_IDENT,
 };
 
 struct cmd_lexer {
     char *Cur;
 };
 
-static enum token_type
+static enum cmd_token
 NextCmdToken(struct cmd_lexer *State, char *Buf, umm Sz)
 {
     Assert(State);
     Assert(Buf);
     Assert(Sz > 0);
 
-    enum token_type Type = TOKEN_NULL;
+    enum cmd_token Type = CT_NULL;
     char *End = Buf + Sz - 1;
 
     while (isspace(*State->Cur)) ++State->Cur;
     if (*State->Cur) {
-        Type = TOKEN_IDENT;
+        Type = CT_IDENT;
         while (*State->Cur && !isspace(*State->Cur)) {
             if (Buf < End) *Buf++ = *State->Cur;
             ++State->Cur;
@@ -203,15 +203,15 @@ GetCell(struct doc_cells *Table, s32 Col, s32 Row)
 }
 
 #if OVERDRAW_ROW
-# define FOREACH_ROW(D,I) for (s32 _END = (D)->Table.Rows, I = 0; I < _END; ++I)
+# define FOREACH_ROW(D,I) for (s32 I##_End = (D)->Table.Rows, I = 0; I < I##_End; ++I)
 #else
-# define FOREACH_ROW(D,I) for (s32 _END = (D)->Rows, I = 0; I < _END; ++I)
+# define FOREACH_ROW(D,I) for (s32 I##_End = (D)->Rows, I = 0; I < I##_End; ++I)
 #endif
 
 #if OVERDRAW_COL
-# define FOREACH_COL(D,I) for (s32 _END = (D)->Table.Cols, I = 0; I < _END; ++I)
+# define FOREACH_COL(D,I) for (s32 I##_End = (D)->Table.Cols, I = 0; I < I##_End; ++I)
 #else
-# define FOREACH_COL(D,I) for (s32 _END = (D)->Cols, I = 0; I < _END; ++I)
+# define FOREACH_COL(D,I) for (s32 I##_End = (D)->Cols, I = 0; I < I##_End; ++I)
 #endif
 
 static struct cell *
@@ -255,6 +255,177 @@ GetAndReserveCell(struct document *Doc, s32 Col, s32 Row)
     return GetCell(&Doc->Table, Col, Row);
 }
 
+enum expr_token {
+    ET_NULL = 0,
+
+    ET_LEFT_PAREN,
+    ET_RIGHT_PAREN,
+    ET_PLUS,
+    ET_MINUS,
+    ET_MULT,
+    ET_DIV,
+    ET_COLON,
+
+    ET_IDENTIFIER_SUM,
+    ET_IDENTIFIER_AVERAGE,
+    ET_IDENTIFIER_COUNT,
+    ET_IDENTIFIER_BODY_ROW,
+
+    ET_IDENTIFIER, /* a non-identified identifier */
+};
+
+static bool
+IsExprIdentifierChar(char Char)
+{
+    switch (Char) {
+    case 0:
+    case '(':
+    case ')':
+    case '+':
+    case '-':
+    case '*':
+    case '/':
+    case ':':
+        return 0;
+    case ' ':
+    case '\t':
+    case '\v':
+    case '\r':
+    case '\n':
+        return 0;
+    default:
+        return 1;
+    }
+}
+
+struct expr_lexer {
+    char *Cur;
+
+    /* TODO(lrak): don't rely on a buffer */
+    char *Buf;
+    umm Sz;
+};
+
+static enum expr_token
+NextExprToken(struct expr_lexer *State)
+{
+    Assert(State);
+    Assert(State->Buf);
+    Assert(State->Sz > 0);
+
+    char *Cur = State->Buf;
+    char *End = State->Buf + State->Sz - 1;
+    enum expr_token Type = 0;
+
+    while (isspace(*State->Cur)) ++State->Cur;
+
+    switch (*State->Cur) {
+    case 0:   ++State->Cur; Type = ET_NULL; break;
+    case '(': ++State->Cur; Type = ET_LEFT_PAREN; break;
+    case ')': ++State->Cur; Type = ET_RIGHT_PAREN; break;
+    case '+': ++State->Cur; Type = ET_PLUS; break;
+    case '-': ++State->Cur; Type = ET_MINUS; break;
+    case '*': ++State->Cur; Type = ET_MULT; break;
+    case '/': ++State->Cur; Type = ET_DIV; break;
+    case ':': ++State->Cur; Type = ET_COLON; break;
+
+    default: {
+        Assert(IsExprIdentifierChar(*State->Cur));
+        do {
+            if (Cur < End) *Cur++ = *State->Cur;
+            ++State->Cur;
+        }
+        while (IsExprIdentifierChar(*State->Cur));
+        *Cur = 0;
+
+        if (0);
+        else if (StrEq(State->Buf, "sum")) {
+            Type = ET_IDENTIFIER_SUM;
+        }
+        else if (StrEq(State->Buf, "avg") || StrEq(State->Buf, "average")) {
+            Type = ET_IDENTIFIER_AVERAGE;
+        }
+        else if (StrEq(State->Buf, "cnt") || StrEq(State->Buf, "count")) {
+            Type = ET_IDENTIFIER_COUNT;
+        }
+        else if (StrEq(State->Buf, "br") || StrEq(State->Buf, "bodyrow")) {
+            Type = ET_IDENTIFIER_BODY_ROW;
+        }
+        else {
+            Type = ET_IDENTIFIER;
+        }
+    } break;
+    }
+
+    *Cur = 0;
+    return Type;
+}
+
+static void
+EvaluateCell(struct document *Doc, struct cell *Cell, s32 Col, s32 Row)
+{
+    Assert(Doc);
+    Assert(Cell);
+    Assert(Cell->Type == CELL_EXPR);
+    (void)Col;
+    (void)Row;
+
+    struct expr_lexer Lexer;
+    char Buf[64];
+    enum expr_token Type;
+
+#if PREPRINT
+    printf("Lexed:  ");
+    Lexer = (struct expr_lexer){ Cell->AsExpr, Buf, sizeof Buf };
+    while ((Type = NextExprToken(&Lexer))) {
+        switch (Type) {
+        case ET_LEFT_PAREN:  printf("("); break;
+        case ET_RIGHT_PAREN: printf(")"); break;
+        case ET_PLUS:        printf("+"); break;
+        case ET_MINUS:       printf("-"); break;
+        case ET_MULT:        printf("*"); break;
+        case ET_DIV:         printf("/"); break;
+        case ET_COLON:       printf(":"); break;
+
+        case ET_IDENTIFIER_SUM:      printf("sum"); break;
+        case ET_IDENTIFIER_AVERAGE:  printf("average"); break;
+        case ET_IDENTIFIER_COUNT:    printf("count"); break;
+        case ET_IDENTIFIER_BODY_ROW: printf("bodyrow"); break;
+
+        case ET_IDENTIFIER: printf("@%s@", Lexer.Buf); break;
+        InvalidDefaultCase;
+        }
+        printf(" ");
+    }
+    printf("\nParsed: ");
+#endif
+
+    /*Lexer = (struct expr_lexer){ Cell->AsExpr, Buf, sizeof Buf };*/
+    /* TODO(lrak): parse then evaluate */
+#if PREPRINT
+    printf("\n");
+#endif
+}
+
+static void
+EvaluateDocument(struct document *Doc)
+{
+    Assert(Doc);
+    s32 NumCols = Doc->Cols;
+    for (s32 Col = 0; Col < NumCols; ++Col) {
+        s32 NumRows = Doc->Rows;
+        for (s32 Row = 0; Row < NumRows; ++Row) {
+            struct cell *This = GetCell(&Doc->Table, Row, Col);
+            if (This->Type == CELL_EXPR) {
+                EvaluateCell(Doc, This, Col, Row);
+            }
+        }
+    }
+#if PREPRINT
+    printf("\n");
+#endif
+}
+
 static void
 PrintDocument(struct document *Doc)
 {
@@ -285,7 +456,7 @@ PrintDocument(struct document *Doc)
             FOREACH_COL(Doc, Col) {
                 struct cell *Cell = GetCell(&Doc->Table, Col, Row);
                 for (s32 It = 0; It < Cell->Width; ++It) putchar('-');
-                if (Col != _END - 1) printf("%s", SEPERATOR);
+                if (Col != Col_End - 1) printf("%s", SEPERATOR);
             }
 #endif
             putchar('\n');
@@ -327,7 +498,7 @@ PrintDocument(struct document *Doc)
                 break;
             InvalidDefaultCase;
             }
-            if (Col != _END - 1) printf(SEPERATOR);
+            if (Col != Col_End - 1) printf(SEPERATOR);
 #endif
         }
         printf("\n");
@@ -405,12 +576,12 @@ MakeDocument(char *Path)
                         }
                         else {
                             Cell->Type = CELL_STRING;
-                            Cell->AsStr = SaveStr(Buf, sizeof Buf);
+                            Cell->AsStr = SaveStr(Buf);
                         }
                         break;
                     case CELL_EXPR:
                         Cell->Type = CELL_EXPR;
-                        Cell->AsExpr = SaveStr(Buf, sizeof Buf);
+                        Cell->AsExpr = SaveStr(Buf);
                         break;
                     InvalidDefaultCase;
                     }
@@ -422,7 +593,7 @@ MakeDocument(char *Path)
 
             case LINE_COMMAND: {
                 char Buf[512];
-                enum token_type Type;
+                enum cmd_token Type;
                 struct cmd_lexer Lexer = { Line };
 
                 enum {
@@ -440,7 +611,7 @@ MakeDocument(char *Path)
                     switch (State) {
                     case STATE_FIRST: {
                         if (0);
-                        else if (strcmp(Buf, "fmt") == 0) {
+                        else if (StrEq(Buf, "fmt")) {
                             State = STATE_FMT;
                         }
                         else State = STATE_ERROR;
@@ -532,17 +703,19 @@ main(s32 ArgCount, char **Args)
         char *Path = Args[Idx];
 
         struct document *Doc = MakeDocument(Path);
+        EvaluateDocument(Doc);
 
         if (Idx != 1) putchar('\n');
         printf("%s: %dx%d (%dx%d)\n", Path, Doc->Cols, Doc->Rows,
                 Doc->Table.Cols, Doc->Table.Rows);
+
         PrintDocument(Doc);
+
         DeleteDocument(Doc);
-        /*ReleaseStrMem();*/
+        /*WipeAllMem();*/
     }
 
-    ReleaseStrMem();
-    /*PrintStrMemInfo();*/
+    PrintAllMemInfo();
 
     return 0;
 }

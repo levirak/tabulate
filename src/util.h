@@ -2,6 +2,10 @@
 #define _util_h_
 #include "main.h"
 
+#include <string.h>
+
+#define StrEq(A,B) (strcmp(A,B) == 0)
+
 
 #define MIN_MAX_DEF_LIST(F) \
         F(s8) F(s16) F(s32) F(s64) \

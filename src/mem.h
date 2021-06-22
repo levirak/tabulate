@@ -2,9 +2,17 @@
 #define _mem_h_
 #include "main.h"
 
-char *SaveStr(char *Str, umm Sz);
+enum page_categories {
+    STRING_PAGES = 0,
+    STRUCT_PAGES,
 
-void PrintStrMemInfo(void);
-void ReleaseStrMem(void);
+    TOTAL_CATEGORIES,
+};
+
+char *SaveStr(char *Str);
+
+void PrintAllMemInfo(void);
+void WipeAllMem(void);
+void ReleaseAllMem(void);
 
 #endif
