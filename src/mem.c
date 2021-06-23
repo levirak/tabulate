@@ -1,6 +1,7 @@
 #include "mem.h"
 
 #include "util.h"
+#include "logging.h"
 
 #include <string.h>
 #include <stdlib.h>
@@ -8,10 +9,9 @@
 #define PAGE_SIZE (4 * 1024)
 
 struct page {
-    char Data[0];
     struct page *Next;
-    umm Size;
-    umm Used;
+    u32 Size;
+    u32 Used;
 } *Category[TOTAL_CATEGORIES] = {0};
 
 #define Fit(S) (((S) + 0xf) & ~0xf)
@@ -35,7 +35,7 @@ Wipe(struct page *FirstPage)
 }
 
 static void *
-Reserve(umm Size, struct page **FirstPage)
+Reserve(u32 Size, struct page **FirstPage)
 {
     Assert(FirstPage);
 
@@ -52,7 +52,7 @@ Reserve(umm Size, struct page **FirstPage)
         Assert(Size <= Page->Size);
     }
 
-    char *New = Page->Data + Page->Used;
+    char *New = (char *)Page + Page->Used;
     Page->Used += Size;
     Assert(Page->Used <= Page->Size);
     return New;
@@ -62,7 +62,7 @@ Reserve(umm Size, struct page **FirstPage)
 char *
 SaveStr(char *Str)
 {
-    umm Sz = strlen(Str) + 1;
+    u32 Sz = strlen(Str) + 1;
     char *New = Reserve(Sz, Category+STRING_PAGES);
     strncpy(New, Str, Sz);
     return New;
@@ -72,7 +72,7 @@ SaveStr(char *Str)
 void
 PrintAllMemInfo(void)
 {
-    printf("\n"
+    printf( "\n"
             "category  this                used      size      next\n"
             "--------  ------------------  --------  --------  ------------------\n");
     for (s32 Idx = 0; Idx < TOTAL_CATEGORIES; ++Idx) {
@@ -81,13 +81,11 @@ PrintAllMemInfo(void)
             printf("%8d  %18p\n", Idx, (void *)0);
         }
         else do {
-#if 0
-            printf("%8d  %18p  0x%04lx  0x%04lx  %18p\n", Idx, This,
-                    This->Used, This->Size, This->Next);
-#else
-            printf("%8d  %18p  %8p  %8p  %18p\n", Idx, This,
-                    (void *)This->Used, (void *)This->Size, This->Next);
-#endif
+            char Buf[16];
+            snprintf(Buf, sizeof Buf, "0x%x", This->Used);
+            printf("%8d  %18p  %8s  ", Idx, This, Buf);
+            snprintf(Buf, sizeof Buf, "0x%x", This->Size);
+            printf("%8s  %18p\n", Buf, This->Next);
         }
         while ((This = This->Next));
     }

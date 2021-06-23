@@ -4,39 +4,12 @@
 #define Unreachable __builtin_unreachable()
 #define NotImplemented __builtin_trap()
 
-#ifdef NDEBUG
-#   define Assert(...)
-#   define static_assert(...) _Static_assert(__VA_ARGS__)
-#   define CheckEq(E, ...) E
-#   define CheckNe(E, ...) E
-#   define CheckGt(E, ...) E
-#   define CheckLt(E, ...) E
-#   define CheckGe(E, ...) E
-#   define CheckLe(E, ...) E
-#   define NotNull(E) E
-#   define InvalidCodePath Unreachable
-#   define InvalidDefaultCase default: Unreachable
-#else
-#   include <assert.h>
-#   define Assert(E) assert(E)
-#   define CheckEq(E, V) assert((E) == (V))
-#   define CheckNe(E, V) assert((E) != (V))
-#   define CheckGt(E, V) assert((E) > (V))
-#   define CheckLt(E, V) assert((E) < (V))
-#   define CheckGe(E, V) assert((E) >= (V))
-#   define CheckLe(E, V) assert((E) <= (V))
-#   define NotNull(E)  assert((E) != NULL)
-#   define InvalidCodePath Assert(!"invalid code path")
-#   define InvalidDefaultCase default: InvalidCodePath
-#endif
-
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
 #include <sys/types.h>
 
-#define Error(M, ...) fprintf(stderr, "[%s:%d] ERROR: " M "\n", __func__, __LINE__, ##__VA_ARGS__)
-
+#define static_assert(...) _Static_assert(__VA_ARGS__)
 #define ArrayCount(A) (sizeof A / sizeof *A)
 #define sArrayCount(A) ((s32)ArrayCount(A))
 

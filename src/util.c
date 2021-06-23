@@ -1,7 +1,8 @@
 #include "util.h"
 
-#include <ctype.h>
+#include "logging.h"
 
+#include <ctype.h>
 
 #define DEFINE(T,L) T NextPow2_##T(T A) { --A; L; ++A; return A | (A == 0); }
 #define X(S) (A |= A >> S)
