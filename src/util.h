@@ -25,22 +25,10 @@ MIN_MAX_DEF_LIST(DEFINE)
 #undef DEFINE
 
 
-#define MIN_MAX3_DEF_LIST(F) \
-        F(s8) F(s16) F(s32) F(s64) \
-        F(u8) F(u16) F(u32) F(u64) \
-        F(f32) F(f64)
+#define Max3(A,B,C) (Max(Max(A,B),C))
+#define Min3(A,B,C) (Min(Min(A,B),C))
 
-#define MAX3_SPECIFICS(T) , T: Max3_##T
-#define Max3(A,B,C) _Generic((A) MIN_MAX3_DEF_LIST(MAX3_SPECIFICS))(A,B,C)
-
-#define MIN3_SPECIFICS(T) , T: Min3_##T
-#define Min3(A,B,C) _Generic((A) MIN_MAX3_DEF_LIST(MIN3_SPECIFICS))(A,B,C)
-
-#define DEFINE(T) \
-        static inline T Max3_##T(T A, T B, T C) { return Max(Max(A,B),C); } \
-        static inline T Min3_##T(T A, T B, T C) { return Min(Min(A,B),C); }
-MIN_MAX3_DEF_LIST(DEFINE)
-#undef DEFINE
+#define Bound(A,B,C) (Min(Max(A,B),C))
 
 
 #define NEXT_POW_2_DEF_LIST \

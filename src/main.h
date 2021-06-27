@@ -4,6 +4,9 @@
 #define Unreachable __builtin_unreachable()
 #define NotImplemented __builtin_trap()
 
+#define InvalidCodePath Unreachable
+#define InvalidDefaultCase default: InvalidCodePath
+
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>

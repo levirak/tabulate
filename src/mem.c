@@ -19,7 +19,7 @@ struct page {
 static struct page *
 NewPage()
 {
-    struct page *Page = malloc(PAGE_SIZE);
+    struct page *Page = NotNull(malloc(PAGE_SIZE));
     Page->Next = 0;
     Page->Size = PAGE_SIZE;
     Page->Used = Fit(sizeof *Page);
@@ -59,13 +59,19 @@ Reserve(u32 Size, struct page **FirstPage)
 }
 
 
+void *
+ReserveData(u32 Sz)
+{
+    return NotNull(Reserve(Sz, Category+DATA_PAGES));
+}
+
 char *
 SaveStr(char *Str)
 {
     u32 Sz = strlen(Str) + 1;
     char *New = Reserve(Sz, Category+STRING_PAGES);
     strncpy(New, Str, Sz);
-    return New;
+    return NotNull(New);
 }
 
 

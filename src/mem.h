@@ -4,11 +4,12 @@
 
 enum page_categories {
     STRING_PAGES = 0,
-    STRUCT_PAGES,
+    DATA_PAGES,
 
     TOTAL_CATEGORIES,
 };
 
+void *ReserveData(u32);
 char *SaveStr(char *Str);
 
 void PrintAllMemInfo(void);
