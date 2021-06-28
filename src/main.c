@@ -14,10 +14,10 @@
 #include <string.h>
 #include <unistd.h>
 
-#define PREPRINT_ROWS 1
-#define PREPRINT_PARSING 1
+#define PREPRINT_ROWS 0
+#define PREPRINT_PARSING 0
 #define BRACKET_CELLS 0
-#define OVERDRAW_ROW 1
+#define OVERDRAW_ROW 0
 #define OVERDRAW_COL 0
 
 #define DEFAULT_CELL_PRECISION 2
@@ -81,14 +81,15 @@ ReadLine(FILE *File, char *Buf, umm Sz)
 
 enum expr_error {
     ERROR_SUCCESS = 0,
-    ERROR_PARSE,
+    ERROR_PARSE,    /* could not parse this expression */
 
-    ERROR_TYPE,
-    ERROR_ARGC,
-    ERROR_CYCLE,
-    ERROR_SET,
+    ERROR_TYPE,     /* can't operate on this type */
+    ERROR_ARGC,     /* didn't get the necessary number of func args */
+    ERROR_CYCLE,    /* evaluation is cyclical */
+    ERROR_SET,      /* could not create cell from expr node */
+    ERROR_SUB,      /* referenced cell was an error */
 
-    ERROR_IMPL,
+    ERROR_IMPL,     /* reach an unimplemented function */
 };
 
 struct cell {
@@ -140,6 +141,7 @@ CellErrStr(enum expr_error Error)
     case ERROR_ARGC:    return "E:ARGC";
     case ERROR_CYCLE:   return "E:CYCLE";
     case ERROR_SET:     return "E:SET";
+    case ERROR_SUB:     return "E:SUB";
 
     case ERROR_IMPL:    return "E:NOIMPL";
     }
@@ -655,17 +657,22 @@ SetCellFromNode(struct cell *Out, struct expr_node *Node)
 
     switch (Node->Type) {
     case EN_ERROR:
-        *Out = ErrorCell(Node->AsError);
+        Out->Type = CELL_ERROR;
+        Out->AsError = Node->AsError;
         break;
     case EN_NUMBER:
-        *Out = NumberCell(Node->AsNumber);
+        Out->Type = CELL_NUMBER;
+        Out->AsNumber = Node->AsNumber;
         break;
     case EN_STRING:
-        *Out = StringCell(Node->AsString);
+        Out->Type = CELL_STRING;
+        Out->AsString = Node->AsString;
         break;
     default:
         LogError("Reduced to unexpected type %d\n", Node->Type);
-        *Out = ErrorCell(ERROR_SET);
+        Out->Type = CELL_ERROR;
+        Out->AsError = ERROR_SET;
+        break;
     }
 
     return Out;
@@ -1084,6 +1091,8 @@ PrintNode(struct expr_node *Node, s32 Depth)
 }
 #endif
 
+static enum expr_error EvaluateCell(struct document *, s32, s32);
+
 static enum expr_error
 SumRange(struct document *Doc, f64 *Out, struct cell_block *Range)
 {
@@ -1098,16 +1107,15 @@ SumRange(struct document *Doc, f64 *Out, struct cell_block *Range)
     s32 LastRow = Bound(0, Range->LastRow, Doc->Rows);
 
     f64 Acc = 0;
-
-#if 0
     for (s32 Col = FirstCol; Col <= LastCol; ++Col) {
         for (s32 Row = FirstRow; Row <= LastRow; ++Row) {
-            NotImplemented;
+            EvaluateCell(Doc, Col, Row);
+            struct cell *Cell = GetCell(Doc, Col, Row);
+            if (Cell->Type == CELL_NUMBER) {
+                Acc += Cell->AsNumber;
+            }
         }
     }
-#else
-    Error = ERROR_IMPL;
-#endif
 
     *Out = Acc;
     return Error;
@@ -1127,16 +1135,13 @@ CountRange(struct document *Doc, f64 *Out, struct cell_block *Range)
     s32 LastRow = Bound(0, Range->LastRow, Doc->Rows);
 
     f64 Acc = 0;
-
-#if 0
     for (s32 Col = FirstCol; Col <= LastCol; ++Col) {
         for (s32 Row = FirstRow; Row <= LastRow; ++Row) {
-            NotImplemented;
+            if (CellExists(Doc, Col, Row)) {
+                ++Acc;
+            }
         }
     }
-#else
-    Error = ERROR_IMPL;
-#endif
 
     *Out = Acc;
     return Error;
@@ -1157,8 +1162,6 @@ IsFinal(struct expr_node *Node)
         return 0;
     }
 }
-
-static enum expr_error EvaluateCell(struct document *, s32, s32);
 
 static struct expr_node *
 ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
@@ -1210,37 +1213,44 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
             Assert(IsFinal(Node));
             break;
         case EN_SUM:
-            Left = ReduceNode(Doc, Node->AsBinary.Left, Col, Row);
+            Left = Node->AsBinary.Left;
             Right = Node->AsBinary.Right;
             if (!Right) {
-                *Node = *Left;
+                *Node = *ReduceNode(Doc, Left, Col, Row);
             }
             else {
                 f64 Acc = 0;
                 enum expr_error Error = 0;
-                enum expr_operator Op = EN_OP_ADD;
-                do {
-                    Assert(IsFinal(Left));
-                    if (Left->Type == EN_ERROR) {
-                        Error = Left->AsError;
-                    }
-                    else if (Left->Type == EN_NUMBER) {
-                        switch (Op) {
+
+                switch (Left->Type) {
+                case EN_NUMBER: Acc = Left->AsNumber; break;
+                case EN_ERROR:  Error = Left->AsError; break;
+                default:        Error = ERROR_TYPE;
+                    LogError("Cannot prod with type %d", Left->Type);
+                    break;
+                }
+
+                struct expr_node *Cur;
+                for (Cur = Right; Cur && !Error; Cur = Cur->AsBinary.Right) {
+                    Assert(Cur->Type == EN_PROD_CONT);
+                    Left = ReduceNode(Doc, Cur->AsBinary.Left, Col, Row);
+                    switch (Left->Type) {
+                    case EN_NUMBER:
+                        switch (Cur->AsBinary.Op) {
                         case EN_OP_ADD: Acc += Left->AsNumber; break;
                         case EN_OP_SUB: Acc -= Left->AsNumber; break;
                         InvalidDefaultCase;
                         }
+                        break;
+                    case EN_ERROR: Error = Left->AsError; break;
+                    default:       Error = ERROR_TYPE;
+                        LogError("Cannot prod with type %d", Left->Type);
+                        break;
                     }
-                    else {
-                        LogError("Cannot sum with type %d", Left->Type);
-                    }
-                    Op = Right->AsBinary.Op;
-                    Left = ReduceNode(Doc, Right->AsBinary.Left, Col, Row);
-                    Right = Right->AsBinary.Right;
                 }
-                while (Right);
 
-                *Node = Error? ErrorNode(ERROR_TYPE): NumberNode(Acc);
+
+                *Node = Error? ErrorNode(ERROR_SUB): NumberNode(Acc);
             }
             break;
         case EN_SUM_CONT:
@@ -1254,29 +1264,35 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
             else {
                 f64 Acc = 1;
                 enum expr_error Error = 0;
-                enum expr_operator Op = EN_OP_MUL;
-                do {
-                    Assert(IsFinal(Left));
-                    if (Left->Type == EN_ERROR) {
-                        Error = Left->AsError;
-                    }
-                    else if (Left->Type == EN_NUMBER) {
-                        switch (Op) {
+
+                switch (Left->Type) {
+                case EN_NUMBER: Acc = Left->AsNumber; break;
+                case EN_ERROR:  Error = Left->AsError; break;
+                default:        Error = ERROR_TYPE;
+                    LogError("Cannot prod with type %d", Left->Type);
+                    break;
+                }
+
+                struct expr_node *Cur;
+                for (Cur = Right; Cur && !Error; Cur = Cur->AsBinary.Right) {
+                    Assert(Cur->Type == EN_PROD_CONT);
+                    Left = ReduceNode(Doc, Cur->AsBinary.Left, Col, Row);
+                    switch (Left->Type) {
+                    case EN_NUMBER:
+                        switch (Cur->AsBinary.Op) {
                         case EN_OP_MUL: Acc *= Left->AsNumber; break;
                         case EN_OP_DIV: Acc /= Left->AsNumber; break;
                         InvalidDefaultCase;
                         }
-                    }
-                    else {
+                        break;
+                    case EN_ERROR: Error = Left->AsError; break;
+                    default:       Error = ERROR_TYPE;
                         LogError("Cannot prod with type %d", Left->Type);
+                        break;
                     }
-                    Op = Right->AsBinary.Op;
-                    Left = ReduceNode(Doc, Right->AsBinary.Left, Col, Row);
-                    Right = Right->AsBinary.Right;
                 }
-                while (!Error && Right);
 
-                *Node = Error? ErrorNode(ERROR_TYPE): NumberNode(Acc);
+                *Node = Error? ErrorNode(ERROR_SUB): NumberNode(Acc);
             }
             break;
         case EN_PROD_CONT:
@@ -1548,7 +1564,7 @@ PrintDocument(struct document *Doc)
             }
 #else
             FOREACH_COL(Doc, Col) {
-                struct cell *Cell = GetCell(&Doc->Table, Col, Row);
+                struct cell *Cell = GetCell(Doc, Col, Row);
                 for (s32 It = 0; It < Cell->Width; ++It) putchar('-');
                 if (Col != Col_End - 1) printf("%s", SEPERATOR);
             }
@@ -1589,6 +1605,9 @@ PrintDocument(struct document *Doc)
                 break;
             case CELL_EXPR:
                 printf("%-*s", Cell->Width, Cell->AsString);
+                break;
+            case CELL_ERROR:
+                printf("%-*s", Cell->Width, CellErrStr(Cell->AsError));
                 break;
             case CELL_NULL:
                 for (s32 It = 0; It < Cell->Width; ++It) putchar(' ');
@@ -1707,7 +1726,7 @@ MakeDocument(char *Path)
                     case STATE_FIRST: {
                         switch (Type) {
                         case CT_FORMAT: State = STATE_FMT; break;
-                        default: State = STATE_ERROR; break;
+                        default:        State = STATE_ERROR; break;
                         }
                     } break;
 
@@ -1719,30 +1738,36 @@ MakeDocument(char *Path)
 
                         /* TODO(lrak): real parser? */
 
-                        switch (*Cur) {
-                        case 'l': ++Cur; Align = ALIGN_LEFT; break;
-                        case 'r': ++Cur; Align = ALIGN_RIGHT; break;
+                        if (StrEq(Cur, "-")) {
+                            /* do not set this column */
                         }
+                        else {
+                            switch (*Cur) {
+                            case 'l': ++Cur; Align = ALIGN_LEFT; break;
+                            case 'r': ++Cur; Align = ALIGN_RIGHT; break;
+                            }
 
-                        if (isdigit(*Cur)) {
-                            Width = 0;
-                            do Width = 10*Width + (*Cur++ - '0');
-                            while (isdigit(*Cur));
-                        }
-
-                        if (*Cur == '.') {
-                            ++Cur;
                             if (isdigit(*Cur)) {
-                                Prcsn = 0;
-                                do Prcsn = 10*Prcsn + (*Cur++ - '0');
+                                Width = 0;
+                                do Width = 10*Width + (*Cur++ - '0');
                                 while (isdigit(*Cur));
                             }
-                        }
 
-                        struct cell *TopCell = ReserveCell(Doc, ArgPos-1, 0);
-                        TopCell->Align = Align;
-                        TopCell->Width = Width;
-                        TopCell->Prcsn = Prcsn;
+                            if (*Cur == '.') {
+                                ++Cur;
+                                if (isdigit(*Cur)) {
+                                    Prcsn = 0;
+                                    do Prcsn = 10*Prcsn + (*Cur++ - '0');
+                                    while (isdigit(*Cur));
+                                }
+                            }
+
+                            struct cell *TopCell;
+                            TopCell = ReserveCell(Doc, ArgPos-1, 0);
+                            TopCell->Align = Align;
+                            TopCell->Width = Width;
+                            TopCell->Prcsn = Prcsn;
+                        }
                     } break;
 
                     default: State = STATE_ERROR; break;
@@ -1799,16 +1824,18 @@ main(s32 ArgCount, char **Args)
         EvaluateDocument(Doc);
 
         if (Idx != 1) putchar('\n');
-        printf("%s: %dx%d (%dx%d)\n", Path, Doc->Cols, Doc->Rows,
-                Doc->Table.Cols, Doc->Table.Rows);
+        if (ArgCount > 2) {
+            printf("%s: %dx%d (%dx%d)\n", Path, Doc->Cols, Doc->Rows,
+                    Doc->Table.Cols, Doc->Table.Rows);
+        }
 
         PrintDocument(Doc);
 
         DeleteDocument(Doc);
-        /*WipeAllMem();*/
+        WipeAllMem();
     }
 
-    PrintAllMemInfo();
+    /*PrintAllMemInfo();*/
 
     return 0;
 }
