@@ -6,15 +6,16 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
+#include <locale.h>
 #include <stdarg.h>
 #include <stdio.h>
-#include <locale.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-#define PREPRINT_ROWS 0
+#define PREPRINT_ROWS 1
 #define PREPRINT_PARSING 0
 #define BRACKET_CELLS 0
 #define OVERDRAW_ROW 0
@@ -88,6 +89,8 @@ enum expr_error {
     ERROR_CYCLE,    /* evaluation is cyclical */
     ERROR_SET,      /* could not create cell from expr node */
     ERROR_SUB,      /* referenced cell was an error */
+    ERROR_DNE,      /* referenced cell does not exist */
+    ERROR_FILE,     /* could not open sub document */
 
     ERROR_IMPL,     /* reach an unimplemented function */
 };
@@ -142,6 +145,8 @@ CellErrStr(enum expr_error Error)
     case ERROR_CYCLE:   return "E:CYCLE";
     case ERROR_SET:     return "E:SET";
     case ERROR_SUB:     return "E:SUB";
+    case ERROR_DNE:     return "E:DNE";
+    case ERROR_FILE:    return "E:FILE";
 
     case ERROR_IMPL:    return "E:NOIMPL";
     }
@@ -189,6 +194,7 @@ enum cmd_token {
     CT_NULL = 0,
 
     CT_FORMAT,
+    CT_SUMMARY,
 
     CT_IDENT,
 };
@@ -223,11 +229,18 @@ NextCmdToken(struct cmd_lexer *State, char *Buf, umm Sz)
         else if (StrEq(Buf, "fmt")) {
             Type = CT_FORMAT;
         }
+        else if (StrEq(Buf, "summary")) {
+            Type = CT_SUMMARY;
+        }
     }
 
     return Type;
 }
 
+
+struct cell_ref {
+    s32 Col, Row;
+};
 
 struct document {
     s32 Cols, Rows;
@@ -235,10 +248,314 @@ struct document {
         s32 Cols, Rows;
         struct cell *Cells;
     } Table;
+    fd Dir;
+
+    bool Summarized;
+    struct cell_ref Summary;
 
     s32 FirstBodyRow;
     s32 FirstFootRow;
 };
+
+static char *
+EditToBaseName(char *Buf, umm Sz)
+{
+    Assert(Buf);
+    Assert(Sz > 0);
+
+    char *Cur = Buf;
+    char *End = Buf + Sz - 1;
+    char *Hold = 0;
+    for (; *Cur && Cur < End; ++Cur) {
+        if (*Cur == '/') Hold = Cur;
+    }
+
+    if (!Hold) {
+        strncpy(Buf, ".", Sz);
+    }
+    else if (StrEq(Buf, "")) {
+        strncpy(Buf, "/", Sz);
+    }
+    else {
+        *Hold = 0;
+    }
+
+    return Buf;
+}
+
+static FILE *
+fopenat(fd At, char *Path)
+{
+    FILE *File = 0;
+    fd Fd = openat(At, Path, O_RDONLY);
+    if (Fd < 0) {
+        /* nop */
+    }
+    else if (!(File = fdopen(Fd, "r"))) {
+        close(Fd);
+    }
+    return File;
+}
+
+static bool
+HalfParseCellRef(s32 IsCol, s32 Alt, char **pCur, s32 *Out)
+{
+    Assert(pCur);
+    Assert(Out);
+
+    s32 (*Test)(s32);
+    s32 Zero, Prev, This, Next;
+    if (IsCol) {
+        Test = isupper; Zero = 'A';
+        Prev = '<'; This = '@'; Next = '>';
+    }
+    else {
+        Test = isdigit; Zero = '0';
+        Prev = '^'; This = '@'; Next = '!';
+    }
+    Assert(Test(Zero));
+
+    s32 Val = 0;
+    char *Cur = *pCur;
+    bool Accept = 0;
+
+    if (Test(*Cur)) {
+        do Val = 10*Val + (*Cur-Zero);
+        while (Test(*++Cur));
+        Accept = 1;
+    }
+    else if (*Cur == Prev) { Accept = 1; ++Cur; Val = Alt - 1; }
+    else if (*Cur == This) { Accept = 1; ++Cur; Val = Alt; }
+    else if (*Cur == Next) { Accept = 1; ++Cur; Val = Alt + 1; }
+
+    *Out = Val;
+    *pCur = Cur;
+    return Accept;
+}
+
+static bool
+ParseCellRef(struct cell_ref Cell, char **pCur, s32 *pCol, s32 *pRow)
+{
+    bool Accept = 0;
+    if (HalfParseCellRef(1, Cell.Col, pCur, pCol)) {
+        Accept = HalfParseCellRef(0, Cell.Row, pCur, pRow);
+    }
+    return Accept;
+}
+
+static struct cell *ReserveCell(struct document *Doc, s32 Col, s32 Row);
+
+static struct document *
+MakeDocument(fd Dir, char *Path)
+{
+    Assert(Path);
+
+    char Buf[1024];
+    FILE *File;
+    fd NewDir = -1;
+    struct document *Doc = 0;
+
+    strncpy(Buf, Path, sizeof Buf);
+    EditToBaseName(Buf, sizeof Buf);
+
+    if ((NewDir = openat(Dir, Buf, O_DIRECTORY | O_RDONLY)) < 0) {
+        LogError("openat");
+    }
+    else if (!(File = fopenat(Dir, Path))) {
+        LogError("fopenat");
+        close(NewDir);
+    }
+    else {
+        *(Doc = NotNull(malloc(sizeof *Doc))) = (struct document){
+            .Dir = NewDir,
+            .FirstBodyRow = 0,
+            .FirstFootRow = INT32_MAX,
+        };
+
+        s32 RowIdx = 0;
+        enum line_type LineType;
+        while ((LineType = ReadLine(File, Buf, sizeof Buf))) {
+#if PREPRINT_ROWS
+            char *Prefix = "UNK";
+            switch (LineType) {
+            case LINE_EMPTY:   Prefix = "NUL"; break;
+            case LINE_ROW:     Prefix = "ROW"; break;
+            case LINE_COMMAND: Prefix = "COM"; break;
+            case LINE_COMMENT: Prefix = "REM"; break;
+            InvalidDefaultCase;
+            }
+            printf("%s.", Prefix);
+#endif
+
+            switch (LineType) {
+            case LINE_EMPTY:
+                if (Doc->FirstBodyRow == 0) {
+                    Doc->FirstBodyRow = RowIdx;
+                }
+                else {
+                    Doc->FirstFootRow = RowIdx;
+                }
+                break;
+
+            case LINE_ROW: {
+                char CellBuf[512];
+                enum cell_type Type;
+                struct row_lexer Lexer = { Buf };
+
+                s32 ColIdx = 0;
+                while ((Type = NextCell(&Lexer, CellBuf, sizeof CellBuf))) {
+                    struct cell *Cell = ReserveCell(Doc, ColIdx, RowIdx);
+                    switch (Type) {
+                        char *Rem; double Value;
+                    case CELL_PRETYPED:
+                        if (*CellBuf && (Value = Str2f64(CellBuf, &Rem), !*Rem)) {
+                            *Cell = NumberCell(Value);
+                        }
+                        else {
+                            *Cell = StringCell(SaveStr(CellBuf));
+                        }
+                        break;
+                    case CELL_EXPR:
+                        *Cell = ExprCell(SaveStr(CellBuf));
+                        break;
+                    InvalidDefaultCase;
+                    }
+#if PREPRINT_ROWS
+                    switch (Cell->Type) {
+                    case CELL_STRING: printf("[%s]", Cell->AsString); break;
+                    case CELL_NUMBER: printf("(%f)", Cell->AsNumber); break;
+                    case CELL_EXPR:   printf("{%s}", Cell->AsExpr); break;
+                    case CELL_ERROR:  printf("<%s>", CellErrStr(Cell->AsError)); break;
+                    default:
+                        LogWarn("Preprint wants to print type %d", Cell->Type);
+                        InvalidCodePath;
+                    }
+#endif
+                    ++ColIdx;
+                }
+                ++RowIdx;
+            } break;
+
+            case LINE_COMMAND: {
+                char CmdBuf[512];
+                enum cmd_token Type;
+                struct cmd_lexer Lexer = { Buf };
+
+                enum {
+                    STATE_FIRST = 0,
+                    STATE_FMT,
+                    STATE_SUMMARY,
+                    STATE_ERROR,
+                } State = 0;
+
+                s32 ArgPos = 0;
+                while ((Type = NextCmdToken(&Lexer, CmdBuf, sizeof CmdBuf))) {
+#if PREPRINT_ROWS
+                    printf("(%s)", CmdBuf);
+#endif
+                    switch (State) {
+                    case STATE_FIRST:
+                        switch (Type) {
+                        case CT_FORMAT:  State = STATE_FMT; break;
+                        case CT_SUMMARY: State = STATE_SUMMARY; break;
+                        default:         State = STATE_ERROR; break;
+                        }
+                        break;
+
+                    case STATE_FMT: {
+                        enum cell_alignment Align = 0;
+                        u8 Width = DEFAULT_CELL_WIDTH;
+                        u8 Prcsn = DEFAULT_CELL_PRECISION;
+                        char *Cur = CmdBuf;
+
+                        /* TODO(lrak): real parser? */
+
+                        if (StrEq(Cur, "-")) {
+                            /* do not set this column */
+                        }
+                        else {
+                            switch (*Cur) {
+                            case 'l': ++Cur; Align = ALIGN_LEFT; break;
+                            case 'r': ++Cur; Align = ALIGN_RIGHT; break;
+                            }
+
+                            if (isdigit(*Cur)) {
+                                Width = 0;
+                                do Width = 10*Width + (*Cur++ - '0');
+                                while (isdigit(*Cur));
+                            }
+
+                            if (*Cur == '.') {
+                                ++Cur;
+                                if (isdigit(*Cur)) {
+                                    Prcsn = 0;
+                                    do Prcsn = 10*Prcsn + (*Cur++ - '0');
+                                    while (isdigit(*Cur));
+                                }
+                            }
+
+                            struct cell *TopCell;
+                            TopCell = ReserveCell(Doc, ArgPos-1, 0);
+                            TopCell->Align = Align;
+                            TopCell->Width = Width;
+                            TopCell->Prcsn = Prcsn;
+                        }
+                    } break;
+
+                    case STATE_SUMMARY: {
+                        s32 RefCol, RefRow;
+                        struct cell_ref ThisCell = { 0, RowIdx };
+                        char *Cur = CmdBuf;
+                        if (ParseCellRef(ThisCell, &Cur, &RefCol, &RefRow)) {
+                            if (!*Cur) {
+                                Doc->Summarized = 1;
+                                Doc->Summary.Col = RefCol;
+                                Doc->Summary.Row = RefRow;
+                            }
+                        }
+
+                        State = STATE_ERROR;
+                    } break;
+
+                    default: State = STATE_ERROR; break;
+                    }
+                    ++ArgPos;
+                }
+            } break;
+
+#if PREPRINT_ROWS
+            case LINE_COMMENT: {
+                char *Cur = Buf;
+                while (*Cur && *Cur != '\n') ++Cur;
+                *Cur = 0;
+                printf("%s", Buf);
+            } break;
+
+#endif
+            default: break;
+            }
+#if PREPRINT_ROWS
+            printf("\n");
+#endif
+        }
+#if PREPRINT_ROWS
+        printf("\n");
+#endif
+
+        fclose(File);
+    }
+
+    return Doc;
+}
+
+static void
+DeleteDocument(struct document *Doc)
+{
+    if (Doc) {
+        free(Doc->Table.Cells);
+        free(Doc);
+    }
+}
 
 static s32
 GetCellIdx(struct doc_cells *Table, s32 Col, s32 Row)
@@ -340,9 +657,7 @@ struct expr_token {
         char *AsString;
         char *AsXeno;
         f64 AsNumber;
-        struct {
-            s32 Col, Row;
-        } AsCell;
+        struct cell_ref AsCell;
     };
 };
 
@@ -356,6 +671,8 @@ IsExprIdentifierChar(char Char)
     case '0' ... '9':
     case '_':
     case '@':
+    case '<': case '>':
+    case '^': case '!':
         return 1;
     }
 }
@@ -367,7 +684,7 @@ struct expr_lexer {
     struct expr_token Held[1];
 
     struct {
-        s32 Col, Row;
+        struct cell_ref CurCell;
     } Ctx;
 
     /* TODO(lrak): don't rely on a buffer */
@@ -381,31 +698,6 @@ UngetExprToken(struct expr_lexer *State, struct expr_token *Token)
     Assert(State);
     Assert(State->NumHeld < sArrayCount(State->Held));
     State->Held[State->NumHeld++] = *Token;
-}
-
-static bool
-HalfParseCellRef(s32 (*Test)(s32), s32 Zero, s32 Alt, char **pCur, s32 *Out)
-{
-    Assert(Test);
-    Assert(pCur);
-    Assert(Out);
-
-    s32 Val = 0;
-    char *Cur = *pCur;
-    bool Accept = 0;
-    if (Test(*Cur)) {
-        do Val = 10*Val + (*Cur-Zero);
-        while (Test(*++Cur));
-        Accept = 1;
-    }
-    else if (*Cur == '@') {
-        ++Cur;
-        Val = Alt;
-        Accept = 1;
-    }
-    *Out = Val;
-    *pCur = Cur;
-    return Accept;
 }
 
 static enum expr_token_type
@@ -440,7 +732,7 @@ NextExprToken(struct expr_lexer *State, struct expr_token *Out)
 
         case '{':
             ++State->Cur;
-            while (*State->Cur && *State->Cur != ':') {
+            while (*State->Cur && *State->Cur != ':' && *State->Cur != '}') {
                 if (Cur < End) *Cur++ = *State->Cur;
                 ++State->Cur;
             }
@@ -489,19 +781,16 @@ NextExprToken(struct expr_lexer *State, struct expr_token *Out)
 #undef X
             else {
                 bool IsCellRef = 0;
-                s32 Col = 0, Row = 0;
+                s32 Col, Row;
 
                 Cur = State->Buf;
-                if (HalfParseCellRef(isupper, 'A', State->Ctx.Col, &Cur, &Col)) {
-                    if (HalfParseCellRef(isdigit, '0', State->Ctx.Row, &Cur, &Row)) {
-                        IsCellRef = (*Cur == 0);
-                    }
+                if (ParseCellRef(State->Ctx.CurCell, &Cur, &Col, &Row)) {
+                    IsCellRef = (*Cur == 0);
                 }
 
                 if (IsCellRef) {
                     Out->Type = ET_CELL_REF;
-                    Out->AsCell.Col = Col;
-                    Out->AsCell.Row = Row;
+                    Out->AsCell = (struct cell_ref){ Col, Row };
                 }
                 else {
                     Out->Type = ET_UNKNOWN;
@@ -583,9 +872,7 @@ struct expr_node {
         f64 AsNumber;
         enum expr_func AsIdent;
         char *AsString;
-        struct {
-            s32 Col, Row;
-        } AsCell;
+        struct cell_ref AsCell;
         struct cell_block {
             s32 FirstCol, FirstRow;
             s32 LastCol, LastRow;
@@ -601,30 +888,33 @@ struct expr_node {
         } AsBinary;
     };
 };
-#define ErrorNode(V)  (struct expr_node){ EN_ERROR, .AsError = (V) }
-#define NumberNode(V) (struct expr_node){ EN_NUMBER, .AsNumber = (V) }
-#define IdentNode(V)  (struct expr_node){ EN_IDENT, .AsIdent = (V) }
-#define StringNode(V) (struct expr_node){ EN_STRING, .AsString = (V) }
-#define CellNode(C,R) (struct expr_node){ EN_CELL, .AsCell = { (C), (R) } }
+
+#define ErrorNode(V)   (struct expr_node){ EN_ERROR, .AsError = (V) }
+#define NumberNode(V)  (struct expr_node){ EN_NUMBER, .AsNumber = (V) }
+#define IdentNode(V)   (struct expr_node){ EN_IDENT, .AsIdent = (V) }
+#define StringNode(V)  (struct expr_node){ EN_STRING, .AsString = (V) }
+#define CellNode(V)    (struct expr_node){ EN_CELL, .AsCell = (V) }
+#define CellNode2(C,R) (struct expr_node){ EN_CELL, .AsCell = { (C), (R) } }
 
 static struct expr_node *ParseSum(struct expr_lexer *);
 
 static struct expr_node *
 NodeFromToken(struct expr_token *Token)
 {
+    Assert(Token);
     struct expr_node *Node = ReserveData(sizeof *Node);
-    switch (NotNull(Token)->Type) {
-    case ET_NUMBER: 
+    switch (Token->Type) {
+    case ET_NUMBER:
         *Node = NumberNode(Token->AsNumber);
         break;
     case ET_FUNC:
         *Node = IdentNode(Token->AsFunc);
         break;
-    case ET_END_XENO_REF:
+    case ET_BEGIN_XENO_REF:
         *Node = StringNode(Token->AsXeno);
         break;
     case ET_CELL_REF:
-        *Node = CellNode(Token->AsCell.Col, Token->AsCell.Row);
+        *Node = CellNode(Token->AsCell);
         break;
     InvalidDefaultCase;
     }
@@ -809,22 +1099,26 @@ ParseXeno(struct expr_lexer *Lexer)
 
     if (NextExprToken(Lexer, &Begin) != ET_BEGIN_XENO_REF) {
         LogError("Expected a begin-xeno token");
-        Assert(!Node);
-    }
-    else if (NextExprToken(Lexer, &Cell) != ET_CELL_REF) {
-        LogError("Expected a cell-ref token");
-        Assert(!Node);
-    }
-    else if (NextExprToken(Lexer, &End) != ET_END_XENO_REF) {
-        LogError("Expected a end-xeno token");
-        Assert(!Node);
     }
     else {
-        *(Node = ReserveData(sizeof *Node)) = (struct expr_node){
-            EN_XENO, .AsBinary = {
-                NodeFromToken(&Begin), NodeFromToken(&Cell), 0
-            },
-        };
+        struct expr_node *Right = 0;
+        if (NextExprToken(Lexer, &Cell) == ET_CELL_REF) {
+            Right = NodeFromToken(&Cell);
+        }
+        else {
+            UngetExprToken(Lexer, &Cell);
+        }
+
+        if (NextExprToken(Lexer, &End) != ET_END_XENO_REF) {
+            LogError("Expected a end-xeno token");
+        }
+        else {
+            *(Node = ReserveData(sizeof *Node)) = (struct expr_node){
+                EN_XENO, .AsBinary = {
+                    NodeFromToken(&Begin), Right, 0
+                },
+            };
+        }
     }
 
     return Node;
@@ -1166,245 +1460,272 @@ IsFinal(struct expr_node *Node)
 static struct expr_node *
 ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
 {
-    if (Node) {
+    if (Node) switch (Node->Type) {
         struct expr_node *Left, *Right, *Child;
-        switch (Node->Type) {
-        case EN_NULL:
-            NotImplemented;
-        case EN_ERROR:
-        case EN_NUMBER:
-        case EN_IDENT:
-        case EN_STRING:
-        case EN_RANGE:
-            /* maximally reduced; */
-            break;
-        case EN_CELL: {
-            s32 SubCol = Node->AsCell.Col;
-            s32 SubRow = Node->AsCell.Row;
-            enum expr_error Err = 0;
+    case EN_NULL:
+        NotImplemented;
+    case EN_ERROR:
+    case EN_NUMBER:
+    case EN_IDENT:
+    case EN_STRING:
+    case EN_RANGE:
+        /* maximally reduced; */
+        break;
+    case EN_CELL: {
+        s32 SubCol = Node->AsCell.Col;
+        s32 SubRow = Node->AsCell.Row;
+        enum expr_error Err = 0;
 
-            if ((Err = EvaluateCell(Doc, SubCol, SubRow))) {
-                *Node = ErrorNode(Err);
+        if (!CellExists(Doc, SubCol, SubRow)) {
+            *Node = ErrorNode(ERROR_DNE);
+        }
+        else if ((Err = EvaluateCell(Doc, SubCol, SubRow))) {
+            *Node = ErrorNode(Err);
+        }
+        else {
+            SetNodeFromCell(Node, GetCell(Doc, SubCol, SubRow));
+        }
+    } break;
+    case EN_ROOT:
+        *Node = *ReduceNode(Doc, Node->AsUnary.Child, Col, Row);
+        Assert(IsFinal(Node));
+        break;
+    case EN_TERM:
+        Child = ReduceNode(Doc, Node->AsUnary.Child, Col, Row);
+        Assert(IsFinal(Child));
+        if (Node->AsUnary.Op == EN_OP_NEGATIVE) {
+            if (Child->Type != EN_NUMBER) {
+                LogError("Cannot negate type non-numbers");
+                *Node = ErrorNode(ERROR_TYPE);
             }
             else {
-                SetNodeFromCell(Node, GetCell(Doc, SubCol, SubRow));
-            }
-        } break;
-        case EN_ROOT:
-            *Node = *ReduceNode(Doc, Node->AsUnary.Child, Col, Row);
-            Assert(IsFinal(Node));
-            break;
-        case EN_TERM:
-            Child = ReduceNode(Doc, Node->AsUnary.Child, Col, Row);
-            Assert(IsFinal(Child));
-            if (Node->AsUnary.Op == EN_OP_NEGATIVE) {
-                if (Child->Type != EN_NUMBER) {
-                    LogError("Cannot negate type non-numbers");
-                    *Node = ErrorNode(ERROR_TYPE);
-                }
-                else {
-                    Child->AsNumber *= -1;
-                    *Node = *Child;
-                }
-            }
-            else {
+                Child->AsNumber *= -1;
                 *Node = *Child;
             }
-            Assert(IsFinal(Node));
-            break;
-        case EN_SUM:
-            Left = Node->AsBinary.Left;
-            Right = Node->AsBinary.Right;
-            if (!Right) {
-                *Node = *ReduceNode(Doc, Left, Col, Row);
-            }
-            else {
-                f64 Acc = 0;
-                enum expr_error Error = 0;
-
-                switch (Left->Type) {
-                case EN_NUMBER: Acc = Left->AsNumber; break;
-                case EN_ERROR:  Error = Left->AsError; break;
-                default:        Error = ERROR_TYPE;
-                    LogError("Cannot prod with type %d", Left->Type);
-                    break;
-                }
-
-                struct expr_node *Cur;
-                for (Cur = Right; Cur && !Error; Cur = Cur->AsBinary.Right) {
-                    Assert(Cur->Type == EN_PROD_CONT);
-                    Left = ReduceNode(Doc, Cur->AsBinary.Left, Col, Row);
-                    switch (Left->Type) {
-                    case EN_NUMBER:
-                        switch (Cur->AsBinary.Op) {
-                        case EN_OP_ADD: Acc += Left->AsNumber; break;
-                        case EN_OP_SUB: Acc -= Left->AsNumber; break;
-                        InvalidDefaultCase;
-                        }
-                        break;
-                    case EN_ERROR: Error = Left->AsError; break;
-                    default:       Error = ERROR_TYPE;
-                        LogError("Cannot prod with type %d", Left->Type);
-                        break;
-                    }
-                }
-
-
-                *Node = Error? ErrorNode(ERROR_SUB): NumberNode(Acc);
-            }
-            break;
-        case EN_SUM_CONT:
-            InvalidCodePath;
-        case EN_PROD:
-            Left = ReduceNode(Doc, Node->AsBinary.Left, Col, Row);
-            Right = Node->AsBinary.Right;
-            if (!Right) {
-                *Node = *Left;
-            }
-            else {
-                f64 Acc = 1;
-                enum expr_error Error = 0;
-
-                switch (Left->Type) {
-                case EN_NUMBER: Acc = Left->AsNumber; break;
-                case EN_ERROR:  Error = Left->AsError; break;
-                default:        Error = ERROR_TYPE;
-                    LogError("Cannot prod with type %d", Left->Type);
-                    break;
-                }
-
-                struct expr_node *Cur;
-                for (Cur = Right; Cur && !Error; Cur = Cur->AsBinary.Right) {
-                    Assert(Cur->Type == EN_PROD_CONT);
-                    Left = ReduceNode(Doc, Cur->AsBinary.Left, Col, Row);
-                    switch (Left->Type) {
-                    case EN_NUMBER:
-                        switch (Cur->AsBinary.Op) {
-                        case EN_OP_MUL: Acc *= Left->AsNumber; break;
-                        case EN_OP_DIV: Acc /= Left->AsNumber; break;
-                        InvalidDefaultCase;
-                        }
-                        break;
-                    case EN_ERROR: Error = Left->AsError; break;
-                    default:       Error = ERROR_TYPE;
-                        LogError("Cannot prod with type %d", Left->Type);
-                        break;
-                    }
-                }
-
-                *Node = Error? ErrorNode(ERROR_SUB): NumberNode(Acc);
-            }
-            break;
-        case EN_PROD_CONT:
-            InvalidCodePath;
-        case EN_LIST:
-            Assert(Node->AsBinary.Left);
-            Left = ReduceNode(Doc, Node->AsBinary.Left, Col, Row);
-            Right = Node->AsBinary.Right;
-            if (!Right) {
-                *Node = *Left;
-            }
-            else {
-                do {
-                    Assert(Right->AsBinary.Left);
-                    ReduceNode(Doc, Right->AsBinary.Left, Col, Row);
-                    Right = Right->AsBinary.Right;
-                }
-                while (Right);
-            }
-            break;
-        case EN_LIST_CONT:
-            InvalidCodePath;
-        case EN_FUNC:
-            Left = ReduceNode(Doc, Node->AsBinary.Left, Col, Row);
-            Assert(Left->Type == EN_IDENT);
-            Right = ReduceNode(Doc, Node->AsBinary.Right, Col, Row);
-
-            switch (Left->AsIdent) {
-            InvalidDefaultCase;
-            case EF_BODY_ROW:
-                if (Right) {
-                    LogError("bodyrow/0 takes 0 arguments");
-                    *Node = ErrorNode(ERROR_ARGC);
-                }
-                else {
-                    *Node = (struct expr_node){ EN_RANGE, .AsRange = {
-                        Col, Doc->FirstBodyRow, Col, Doc->FirstFootRow - 1,
-                    }};
-                }
-                break;
-            case EF_SUM:
-                if (!Right) {
-                    LogError("sum/1 takes one argument");
-                    *Node = ErrorNode(ERROR_ARGC);
-                }
-                else if (Right->Type != EN_RANGE) {
-                    LogError("sum/1 takes a range");
-                    *Node = ErrorNode(ERROR_TYPE);
-                }
-                else {
-                    enum expr_error Err;
-                    f64 Sum = 0;
-                    if ((Err = SumRange(Doc, &Sum, &Right->AsRange))) {
-                        *Node = ErrorNode(Err);
-                    }
-                    else {
-                        *Node = NumberNode(Sum);
-                    }
-                }
-                break;
-            case EF_AVERAGE:
-                if (!Right) {
-                    LogError("average/1 takes one argument");
-                    *Node = ErrorNode(ERROR_ARGC);
-                }
-                else if (Right->Type != EN_RANGE) {
-                    LogError("average/1 takes a range");
-                    *Node = ErrorNode(ERROR_TYPE);
-                }
-                else {
-                    enum expr_error Err;
-                    f64 Sum = 0, Count = 0;
-
-                    if ((Err = SumRange(Doc, &Sum, &Right->AsRange))) {
-                        *Node = ErrorNode(Err);
-                    }
-                    else if ((Err = CountRange(Doc, &Count, &Right->AsRange))) {
-                        *Node = ErrorNode(Err);
-                    }
-                    else {
-                        *Node = NumberNode(Count? Sum / Count: 0);
-                    }
-                }
-                break;
-            case EF_COUNT:
-                if (!Right) {
-                    LogError("count/1 takes one argument");
-                    *Node = ErrorNode(ERROR_ARGC);
-                }
-                else if (Right->Type != EN_RANGE) {
-                    LogError("count/1 takes a range");
-                    *Node = ErrorNode(ERROR_TYPE);
-                }
-                else {
-                    Assert (Right->Type == EN_RANGE);
-                    enum expr_error Err;
-                    f64 Count = 0;
-
-                    if ((Err = CountRange(Doc, &Count, &Right->AsRange))) {
-                        *Node = ErrorNode(Err);
-                    }
-                    else {
-                        *Node = NumberNode(Count);
-                    }
-                }
-                break;
-            }
-            break;
-        case EN_XENO:
-            NotImplemented;
-        InvalidDefaultCase;
         }
+        else {
+            *Node = *Child;
+        }
+        Assert(IsFinal(Node));
+        break;
+    case EN_SUM:
+        Left = ReduceNode(Doc, Node->AsBinary.Left, Col, Row);
+        Right = Node->AsBinary.Right;
+        if (!Right) {
+            *Node = *Left;
+        }
+        else {
+            f64 Acc = 1;
+            enum expr_error Error = 0;
+
+            switch (Left->Type) {
+            case EN_NUMBER: Acc = Left->AsNumber; break;
+            case EN_ERROR:  Error = Left->AsError; break;
+            default:        Error = ERROR_TYPE;
+                LogError("Cannot sum with type %d", Left->Type);
+                break;
+            }
+
+            struct expr_node *Cur;
+            for (Cur = Right; Cur && !Error; Cur = Cur->AsBinary.Right) {
+                Assert(Cur->Type == EN_SUM_CONT);
+                Left = ReduceNode(Doc, Cur->AsBinary.Left, Col, Row);
+                switch (Left->Type) {
+                case EN_NUMBER:
+                    switch (Cur->AsBinary.Op) {
+                    case EN_OP_ADD: Acc += Left->AsNumber; break;
+                    case EN_OP_SUB: Acc -= Left->AsNumber; break;
+                    InvalidDefaultCase;
+                    }
+                    break;
+                case EN_ERROR: Error = Left->AsError; break;
+                default:       Error = ERROR_TYPE;
+                    LogError("Cannot sum with type %d", Left->Type);
+                    break;
+                }
+            }
+
+            *Node = Error? ErrorNode(ERROR_SUB): NumberNode(Acc);
+        }
+        break;
+    case EN_SUM_CONT:
+        InvalidCodePath;
+    case EN_PROD:
+        Left = ReduceNode(Doc, Node->AsBinary.Left, Col, Row);
+        Right = Node->AsBinary.Right;
+        if (!Right) {
+            *Node = *Left;
+        }
+        else {
+            f64 Acc = 1;
+            enum expr_error Error = 0;
+
+            switch (Left->Type) {
+            case EN_NUMBER: Acc = Left->AsNumber; break;
+            case EN_ERROR:  Error = Left->AsError; break;
+            default:        Error = ERROR_TYPE;
+                LogError("Cannot prod with type %d", Left->Type);
+                break;
+            }
+
+            struct expr_node *Cur;
+            for (Cur = Right; Cur && !Error; Cur = Cur->AsBinary.Right) {
+                Assert(Cur->Type == EN_PROD_CONT);
+                Left = ReduceNode(Doc, Cur->AsBinary.Left, Col, Row);
+                switch (Left->Type) {
+                case EN_NUMBER:
+                    switch (Cur->AsBinary.Op) {
+                    case EN_OP_MUL: Acc *= Left->AsNumber; break;
+                    case EN_OP_DIV: Acc /= Left->AsNumber; break;
+                    InvalidDefaultCase;
+                    }
+                    break;
+                case EN_ERROR: Error = Left->AsError; break;
+                default:       Error = ERROR_TYPE;
+                    LogError("Cannot prod with type %d", Left->Type);
+                    break;
+                }
+            }
+
+            *Node = Error? ErrorNode(ERROR_SUB): NumberNode(Acc);
+        }
+        break;
+    case EN_PROD_CONT:
+        InvalidCodePath;
+    case EN_LIST:
+        Assert(Node->AsBinary.Left);
+        Left = ReduceNode(Doc, Node->AsBinary.Left, Col, Row);
+        Right = Node->AsBinary.Right;
+        if (!Right) {
+            *Node = *Left;
+        }
+        else {
+            do {
+                Assert(Right->AsBinary.Left);
+                ReduceNode(Doc, Right->AsBinary.Left, Col, Row);
+                Right = Right->AsBinary.Right;
+            }
+            while (Right);
+        }
+        break;
+    case EN_LIST_CONT:
+        InvalidCodePath;
+    case EN_FUNC:
+        Left = ReduceNode(Doc, Node->AsBinary.Left, Col, Row);
+        Assert(Left->Type == EN_IDENT);
+        Right = ReduceNode(Doc, Node->AsBinary.Right, Col, Row);
+
+        switch (Left->AsIdent) {
+        InvalidDefaultCase;
+        case EF_BODY_ROW:
+            if (Right) {
+                LogError("bodyrow/0 takes 0 arguments");
+                *Node = ErrorNode(ERROR_ARGC);
+            }
+            else {
+                *Node = (struct expr_node){ EN_RANGE, .AsRange = {
+                    Col, Doc->FirstBodyRow, Col, Doc->FirstFootRow - 1,
+                }};
+            }
+            break;
+        case EF_SUM:
+            if (!Right) {
+                LogError("sum/1 takes one argument");
+                *Node = ErrorNode(ERROR_ARGC);
+            }
+            else if (Right->Type != EN_RANGE) {
+                LogError("sum/1 takes a range");
+                *Node = ErrorNode(ERROR_TYPE);
+            }
+            else {
+                enum expr_error Err;
+                f64 Sum = 0;
+                if ((Err = SumRange(Doc, &Sum, &Right->AsRange))) {
+                    *Node = ErrorNode(Err);
+                }
+                else {
+                    *Node = NumberNode(Sum);
+                }
+            }
+            break;
+        case EF_AVERAGE:
+            if (!Right) {
+                LogError("average/1 takes one argument");
+                *Node = ErrorNode(ERROR_ARGC);
+            }
+            else if (Right->Type != EN_RANGE) {
+                LogError("average/1 takes a range");
+                *Node = ErrorNode(ERROR_TYPE);
+            }
+            else {
+                enum expr_error Err;
+                f64 Sum = 0, Count = 0;
+
+                if ((Err = SumRange(Doc, &Sum, &Right->AsRange))) {
+                    *Node = ErrorNode(Err);
+                }
+                else if ((Err = CountRange(Doc, &Count, &Right->AsRange))) {
+                    *Node = ErrorNode(Err);
+                }
+                else {
+                    *Node = NumberNode(Count? Sum / Count: 0);
+                }
+            }
+            break;
+        case EF_COUNT:
+            if (!Right) {
+                LogError("count/1 takes one argument");
+                *Node = ErrorNode(ERROR_ARGC);
+            }
+            else if (Right->Type != EN_RANGE) {
+                LogError("count/1 takes a range");
+                *Node = ErrorNode(ERROR_TYPE);
+            }
+            else {
+                Assert (Right->Type == EN_RANGE);
+                enum expr_error Err;
+                f64 Count = 0;
+
+                if ((Err = CountRange(Doc, &Count, &Right->AsRange))) {
+                    *Node = ErrorNode(Err);
+                }
+                else {
+                    *Node = NumberNode(Count);
+                }
+            }
+            break;
+        }
+        break;
+    case EN_XENO: {
+            Left = Node->AsBinary.Left;
+            Assert(Left->Type == EN_STRING);
+            Right = Node->AsBinary.Right;
+            struct document *SubDoc = MakeDocument(Doc->Dir, Left->AsString);
+            if (!SubDoc) {
+                *Node = ErrorNode(ERROR_FILE);
+            }
+            else {
+                s32 SubCol, SubRow;
+                if (Right) {
+                    Assert(Right->Type == EN_CELL);
+                    SubCol = Right->AsCell.Col;
+                    SubRow = Right->AsCell.Row;
+                    EvaluateCell(SubDoc, SubCol, SubRow);
+                    SetNodeFromCell(Node, GetCell(SubDoc, SubCol, SubRow));
+                }
+                else if (SubDoc->Summarized) {
+                    SubCol = SubDoc->Summary.Col;
+                    SubRow = SubDoc->Summary.Row;
+                    EvaluateCell(SubDoc, SubCol, SubRow);
+                    SetNodeFromCell(Node, GetCell(SubDoc, SubCol, SubRow));
+                }
+                else {
+                    *Node = ErrorNode(ERROR_DNE);
+                }
+                DeleteDocument(SubDoc);
+            }
+        } break;
+    InvalidDefaultCase;
     }
 
     return Node;
@@ -1423,7 +1744,7 @@ EvaluateCell(struct document *Doc, s32 Col, s32 Row)
         char Buf[64];
         struct expr_lexer Lexer = {
             .Cur = Cell->AsExpr,
-            .Ctx = { Col, Row },
+            .Ctx.CurCell = { Col, Row },
             .Buf = Buf, .Sz = sizeof Buf,
         };
 
@@ -1553,6 +1874,11 @@ PrintDocument(struct document *Doc)
         }
     }
 
+    /*if (Doc->Summarized)*/
+    {
+        printf("Summary cell: %d,%d\n", Doc->Summary.Col, Doc->Summary.Row);
+    }
+
     FOREACH_ROW(Doc, Row) {
         if (Row == Doc->FirstBodyRow || Row == Doc->FirstFootRow) {
 #if BRACKETED
@@ -1623,193 +1949,6 @@ PrintDocument(struct document *Doc)
 #undef FOREACH_ROW
 }
 
-static struct document *
-MakeDocument(char *Path)
-{
-    Assert(Path);
-
-    FILE *File;
-    struct document *Doc = 0;
-
-    if (!(File = fopen(Path, "r"))) {
-        LogError("fopen");
-    }
-    else {
-        *(Doc = NotNull(malloc(sizeof *Doc))) = (struct document){
-            .FirstBodyRow = 0,
-            .FirstFootRow = INT32_MAX,
-        };
-
-        char Line[1024];
-        enum line_type LineType;
-
-        s32 RowIdx = 0;
-        while ((LineType = ReadLine(File, Line, sizeof Line))) {
-#if PREPRINT_ROWS
-            char *Prefix = "UNK";
-            switch (LineType) {
-            case LINE_EMPTY:   Prefix = "NUL"; break;
-            case LINE_ROW:     Prefix = "ROW"; break;
-            case LINE_COMMAND: Prefix = "COM"; break;
-            case LINE_COMMENT: Prefix = "REM"; break;
-            InvalidDefaultCase;
-            }
-            printf("%s.", Prefix);
-#endif
-
-            switch (LineType) {
-            case LINE_EMPTY:
-                if (Doc->FirstBodyRow == 0) {
-                    Doc->FirstBodyRow = RowIdx;
-                }
-                else {
-                    Doc->FirstFootRow = RowIdx;
-                }
-                break;
-
-            case LINE_ROW: {
-                char Buf[512];
-                enum cell_type Type;
-                struct row_lexer Lexer = { Line };
-
-                s32 ColIdx = 0;
-                while ((Type = NextCell(&Lexer, Buf, sizeof Buf))) {
-                    struct cell *Cell = ReserveCell(Doc, ColIdx, RowIdx);
-                    switch (Type) {
-                        char *Rem; double Value;
-                    case CELL_PRETYPED:
-                        if (*Buf && (Value = Str2f64(Buf, &Rem), !*Rem)) {
-                            *Cell = NumberCell(Value);
-                        }
-                        else {
-                            *Cell = StringCell(SaveStr(Buf));
-                        }
-                        break;
-                    case CELL_EXPR:
-                        *Cell = ExprCell(SaveStr(Buf));
-                        break;
-                    InvalidDefaultCase;
-                    }
-#if PREPRINT_ROWS
-                    switch (Cell->Type) {
-                    case CELL_STRING: printf("[%s]", Cell->AsString); break;
-                    case CELL_NUMBER: printf("(%f)", Cell->AsNumber); break;
-                    case CELL_EXPR:   printf("{%s}", Cell->AsExpr); break;
-                    case CELL_ERROR:  printf("<%s>", CellErrStr(Cell->AsError)); break;
-                    default:
-                        LogWarn("Preprint wants to print type %d", Cell->Type);
-                        InvalidCodePath;
-                    }
-#endif
-                    ++ColIdx;
-                }
-                ++RowIdx;
-            } break;
-
-            case LINE_COMMAND: {
-                char Buf[512];
-                enum cmd_token Type;
-                struct cmd_lexer Lexer = { Line };
-
-                enum {
-                    STATE_FIRST = 0,
-                    STATE_FMT,
-                    STATE_ERROR,
-                } State = 0;
-
-                s32 ArgPos = 0;
-                while ((Type = NextCmdToken(&Lexer, Buf, sizeof Buf))) {
-#if PREPRINT_ROWS
-                    printf("(%s)", Buf);
-#endif
-                    switch (State) {
-                    case STATE_FIRST: {
-                        switch (Type) {
-                        case CT_FORMAT: State = STATE_FMT; break;
-                        default:        State = STATE_ERROR; break;
-                        }
-                    } break;
-
-                    case STATE_FMT: {
-                        enum cell_alignment Align = 0;
-                        u8 Width = DEFAULT_CELL_WIDTH;
-                        u8 Prcsn = DEFAULT_CELL_PRECISION;
-                        char *Cur = Buf;
-
-                        /* TODO(lrak): real parser? */
-
-                        if (StrEq(Cur, "-")) {
-                            /* do not set this column */
-                        }
-                        else {
-                            switch (*Cur) {
-                            case 'l': ++Cur; Align = ALIGN_LEFT; break;
-                            case 'r': ++Cur; Align = ALIGN_RIGHT; break;
-                            }
-
-                            if (isdigit(*Cur)) {
-                                Width = 0;
-                                do Width = 10*Width + (*Cur++ - '0');
-                                while (isdigit(*Cur));
-                            }
-
-                            if (*Cur == '.') {
-                                ++Cur;
-                                if (isdigit(*Cur)) {
-                                    Prcsn = 0;
-                                    do Prcsn = 10*Prcsn + (*Cur++ - '0');
-                                    while (isdigit(*Cur));
-                                }
-                            }
-
-                            struct cell *TopCell;
-                            TopCell = ReserveCell(Doc, ArgPos-1, 0);
-                            TopCell->Align = Align;
-                            TopCell->Width = Width;
-                            TopCell->Prcsn = Prcsn;
-                        }
-                    } break;
-
-                    default: State = STATE_ERROR; break;
-                    }
-                    ++ArgPos;
-                }
-            } break;
-
-#if PREPRINT_ROWS
-            case LINE_COMMENT: {
-                char *Cur = Line;
-                while (*Cur && *Cur != '\n') ++Cur;
-                *Cur = 0;
-                printf("%s", Line);
-            } break;
-
-#endif
-            default: break;
-            }
-#if PREPRINT_ROWS
-            printf("\n");
-#endif
-        }
-#if PREPRINT_ROWS
-        printf("\n");
-#endif
-
-        fclose(File);
-    }
-
-    return Doc;
-}
-
-static void
-DeleteDocument(struct document *Doc)
-{
-    if (Doc) {
-        free(Doc->Table.Cells);
-        free(Doc);
-    }
-}
-
 
 s32
 main(s32 ArgCount, char **Args)
@@ -1820,7 +1959,7 @@ main(s32 ArgCount, char **Args)
     for (s32 Idx = 1; Idx < ArgCount; ++Idx) {
         char *Path = Args[Idx];
 
-        struct document *Doc = MakeDocument(Path);
+        struct document *Doc = NotNull(MakeDocument(AT_FDCWD, Path));
         EvaluateDocument(Doc);
 
         if (Idx != 1) putchar('\n');
