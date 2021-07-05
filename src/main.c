@@ -1992,7 +1992,10 @@ PrintDocument(struct document *Doc)
         }
     }
 
+    bool IsSummarized = Doc->Summarized;
     FOREACH_ROW(Doc, Row) {
+        bool IsSummaryRow = IsSummarized && Row == Doc->Summary.Row;
+
         if (Row == Doc->FirstBodyRow || Row == Doc->FirstFootRow) {
 #if BRACKETED
             FOREACH_COL(Doc, Col) {
@@ -2004,8 +2007,13 @@ PrintDocument(struct document *Doc)
 #else
             FOREACH_COL(Doc, Col) {
                 struct cell *Cell = GetCell(Doc, Col, Row);
-                for (s32 It = 0; It < Cell->Width; ++It) putchar('-');
-                if (Col != Col_End - 1) printf("%s", SEPERATOR);
+                if (Col != 0) printf("%s", SEPERATOR);
+                if (IsSummaryRow && Col == Doc->Summary.Col) {
+                    for (s32 It = 0; It < Cell->Width; ++It) putchar('=');
+                }
+                else {
+                    for (s32 It = 0; It < Cell->Width; ++It) putchar('-');
+                }
             }
 #endif
             putchar('\n');
@@ -2035,6 +2043,7 @@ PrintDocument(struct document *Doc)
             InvalidDefaultCase;
             }
 #else
+            if (Col != 0) printf(SEPERATOR);
             switch (Cell->Type) {
             case CELL_STRING:
                 printf("%-*s", Cell->Width, Cell->AsString);
@@ -2053,10 +2062,39 @@ PrintDocument(struct document *Doc)
                 break;
             InvalidDefaultCase;
             }
-            if (Col != Col_End - 1) printf(SEPERATOR);
 #endif
         }
         printf("\n");
+
+        if (Doc->Summarized && Row == Doc->Summary.Row) {
+#if BRACKETED
+            FOREACH_COL(Doc, Col) {
+                struct cell *Cell = GetCell(Doc, Col, Row);
+                if (Col == Doc->Summary.Col) {
+                    putchar('|');
+                    for (s32 It = 0; It < Cell->Width; ++It) putchar('^');
+                    putchar('|');
+                }
+                else {
+                    putchar('.');
+                    for (s32 It = 0; It < Cell->Width; ++It) putchar('.');
+                    putchar('.');
+                }
+            }
+#else
+            FOREACH_COL(Doc, Col) {
+                struct cell *Cell = GetCell(Doc, Col, Row);
+                if (Col != 0) printf("%s", SEPERATOR);
+                if (Col == Doc->Summary.Col) {
+                    for (s32 It = 0; It < Cell->Width; ++It) putchar('=');
+                }
+                else {
+                    for (s32 It = 0; It < Cell->Width; ++It) putchar(' ');
+                }
+            }
+#endif
+            putchar('\n');
+        }
     }
 #undef FOREACH_COL
 #undef FOREACH_ROW
