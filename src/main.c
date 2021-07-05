@@ -13,13 +13,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
-#define PREPRINT_ROWS 1
+#define PREPRINT_ROWS 0
 #define PREPRINT_PARSING 0
 #define BRACKET_CELLS 0
 #define OVERDRAW_ROW 0
 #define OVERDRAW_COL 0
+#define ANNOUNCE_NEW_DOCUMENT 0
+#define PRINT_MEM_INFO 0
 
 #define DEFAULT_CELL_PRECISION 2
 #define DEFAULT_CELL_WIDTH 4
@@ -27,8 +30,12 @@
 #define INIT_ROW_COUNT 16
 #define INIT_COL_COUNT 8
 #define SEPERATOR "  "
+#define INIT_DOC_CACHE_SIZE 32
 
 #define BRACKETED (BRACKET_CELLS || OVERDRAW_COL || OVERDRAW_ROW)
+
+
+#define ROW_SUMMARY (-1)
 
 
 enum line_type {
@@ -249,6 +256,8 @@ struct document {
         struct cell *Cells;
     } Table;
     fd Dir;
+    dev_t Device;
+    ino_t Inode;
 
     bool Summarized;
     struct cell_ref Summary;
@@ -256,6 +265,40 @@ struct document {
     s32 FirstBodyRow;
     s32 FirstFootRow;
 };
+
+umm CacheSize = 0;
+umm CacheCount = 0;
+struct document **DocCache = 0;
+
+static struct document *
+FindExistingDoc(dev_t Device, ino_t Inode)
+{
+    struct document *Doc = 0;
+    if (DocCache) {
+        for (umm Idx = 0; Idx < CacheCount; ++Idx) {
+            struct document *This = DocCache[Idx];
+            if (This->Device == Device && This->Inode == Inode) {
+                Assert(!Doc);
+                Doc = This;
+            }
+        }
+    }
+    return Doc;
+}
+
+static struct document *
+AllocAndLogDoc()
+{
+    umm Idx = CacheCount++;
+    if (CacheCount > CacheSize) {
+        CacheSize = NextPow2(Max(CacheCount, INIT_DOC_CACHE_SIZE));
+#if ANNOUNCE_NEW_DOCUMENT
+        LogInfo("Resizing document cache to %lu", CacheSize);
+#endif
+        DocCache = NotNull(realloc(DocCache, CacheSize * sizeof **DocCache));
+    }
+    return NotNull(DocCache[Idx] = malloc(sizeof (struct document)));
+}
 
 static char *
 EditToBaseName(char *Buf, umm Sz)
@@ -298,48 +341,43 @@ fopenat(fd At, char *Path)
 }
 
 static bool
-HalfParseCellRef(s32 IsCol, s32 Alt, char **pCur, s32 *Out)
-{
-    Assert(pCur);
-    Assert(Out);
-
-    s32 (*Test)(s32);
-    s32 Zero, Prev, This, Next;
-    if (IsCol) {
-        Test = isupper; Zero = 'A';
-        Prev = '<'; This = '@'; Next = '>';
-    }
-    else {
-        Test = isdigit; Zero = '0';
-        Prev = '^'; This = '@'; Next = '!';
-    }
-    Assert(Test(Zero));
-
-    s32 Val = 0;
-    char *Cur = *pCur;
-    bool Accept = 0;
-
-    if (Test(*Cur)) {
-        do Val = 10*Val + (*Cur-Zero);
-        while (Test(*++Cur));
-        Accept = 1;
-    }
-    else if (*Cur == Prev) { Accept = 1; ++Cur; Val = Alt - 1; }
-    else if (*Cur == This) { Accept = 1; ++Cur; Val = Alt; }
-    else if (*Cur == Next) { Accept = 1; ++Cur; Val = Alt + 1; }
-
-    *Out = Val;
-    *pCur = Cur;
-    return Accept;
-}
-
-static bool
 ParseCellRef(struct cell_ref Cell, char **pCur, s32 *pCol, s32 *pRow)
 {
+    Assert(pCur);
+    Assert(pCol);
+    Assert(pRow);
+
+    bool HasCol = 0;
     bool Accept = 0;
-    if (HalfParseCellRef(1, Cell.Col, pCur, pCol)) {
-        Accept = HalfParseCellRef(0, Cell.Row, pCur, pRow);
+    char *Cur = *pCur;
+    s32 Col = 0;
+    s32 Row = 0;
+
+    if (isupper(*Cur)) {
+        HasCol = 1;
+        do Col = 10*Col + (*Cur - 'A');
+        while (isupper(*++Cur));
     }
+    else if (*Cur == '@') { HasCol = 1; ++Cur; Col = Cell.Col; }
+
+    if (HasCol) {
+        if (isdigit(*Cur)) {
+            Accept = 1;
+            do Row = 10*Row + (*Cur - '0');
+            while (isdigit(*++Cur));
+        }
+        else if (*Cur == '^') { Accept = 1; ++Cur; Row = Cell.Row - 1; }
+        else if (*Cur == '@') { Accept = 1; ++Cur; Row = Cell.Row; }
+        else if (*Cur == '!') { Accept = 1; ++Cur; Row = Cell.Row + 1; }
+        else if (*Cur == '$') { Accept = 1; ++Cur; Row = ROW_SUMMARY; }
+    }
+
+    if (!Accept) {
+        Col =  0; Row = 0;
+    }
+    *pCol = Col;
+    *pRow = Row;
+    *pCur = Cur;
     return Accept;
 }
 
@@ -352,13 +390,20 @@ MakeDocument(fd Dir, char *Path)
 
     char Buf[1024];
     FILE *File;
+    struct stat Stat;
     fd NewDir = -1;
     struct document *Doc = 0;
 
     strncpy(Buf, Path, sizeof Buf);
     EditToBaseName(Buf, sizeof Buf);
 
-    if ((NewDir = openat(Dir, Buf, O_DIRECTORY | O_RDONLY)) < 0) {
+    if (fstatat(Dir, Path, &Stat, 0)) {
+        LogError("fstatat");
+    }
+    else if ((Doc = FindExistingDoc(Stat.st_dev, Stat.st_ino))) {
+        /* nop. we got the document */
+    }
+    else if ((NewDir = openat(Dir, Buf, O_DIRECTORY | O_RDONLY)) < 0) {
         LogError("openat");
     }
     else if (!(File = fopenat(Dir, Path))) {
@@ -366,11 +411,16 @@ MakeDocument(fd Dir, char *Path)
         close(NewDir);
     }
     else {
-        *(Doc = NotNull(malloc(sizeof *Doc))) = (struct document){
+        *(Doc = AllocAndLogDoc()) = (struct document){
             .Dir = NewDir,
             .FirstBodyRow = 0,
             .FirstFootRow = INT32_MAX,
+            .Device = Stat.st_dev,
+            .Inode = Stat.st_ino,
         };
+#if ANNOUNCE_NEW_DOCUMENT
+        LogInfo("Making document %s", Path);
+#endif
 
         s32 RowIdx = 0;
         enum line_type LineType;
@@ -382,7 +432,7 @@ MakeDocument(fd Dir, char *Path)
             case LINE_ROW:     Prefix = "ROW"; break;
             case LINE_COMMAND: Prefix = "COM"; break;
             case LINE_COMMENT: Prefix = "REM"; break;
-            InvalidDefaultCase;
+                            InvalidDefaultCase;
             }
             printf("%s.", Prefix);
 #endif
@@ -418,7 +468,7 @@ MakeDocument(fd Dir, char *Path)
                     case CELL_EXPR:
                         *Cell = ExprCell(SaveStr(CellBuf));
                         break;
-                    InvalidDefaultCase;
+                        InvalidDefaultCase;
                     }
 #if PREPRINT_ROWS
                     switch (Cell->Type) {
@@ -427,8 +477,8 @@ MakeDocument(fd Dir, char *Path)
                     case CELL_EXPR:   printf("{%s}", Cell->AsExpr); break;
                     case CELL_ERROR:  printf("<%s>", CellErrStr(Cell->AsError)); break;
                     default:
-                        LogWarn("Preprint wants to print type %d", Cell->Type);
-                        InvalidCodePath;
+                                    LogWarn("Preprint wants to print type %d", Cell->Type);
+                                    InvalidCodePath;
                     }
 #endif
                     ++ColIdx;
@@ -566,8 +616,23 @@ GetCellIdx(struct doc_cells *Table, s32 Col, s32 Row)
 }
 
 static s32
+CanonicalRow(struct document *Doc, s32 Row)
+{
+    if (Row == ROW_SUMMARY) {
+        if (Doc->Summarized) {
+            Row = Doc->Summary.Row;
+        }
+        else {
+            Row = Bound(0, Doc->FirstFootRow, Doc->Rows - 1);
+        }
+    }
+    return Row;
+}
+
+static s32
 CellExists(struct document *Doc, s32 Col, s32 Row)
 {
+    Row = CanonicalRow(Doc, Row);
     return 0 <= Col && Col < Doc->Table.Cols
         && 0 <= Row && Row < Doc->Table.Rows;
 }
@@ -577,6 +642,8 @@ GetCell(struct document *Doc, s32 Col, s32 Row)
 {
     Assert(Doc);
     struct cell *Cell = 0;
+
+    Row = CanonicalRow(Doc, Row);
     if (CellExists(Doc, Col, Row)) {
         Cell = Doc->Table.Cells + GetCellIdx(&Doc->Table, Col, Row);
     }
@@ -598,7 +665,7 @@ ReserveCell(struct document *Doc, s32 Col, s32 Row)
         };
 
         umm NewSize = sizeof *New.Cells * New.Cols * New.Rows;
-        New.Cells = malloc(NewSize);
+        New.Cells = NotNull(malloc(NewSize));
         memset(New.Cells, 0, NewSize);
 
         if (Doc->Table.Cells) {
@@ -671,7 +738,7 @@ IsExprIdentifierChar(char Char)
     case '0' ... '9':
     case '_':
     case '@':
-    case '<': case '>':
+    case '$':
     case '^': case '!':
         return 1;
     }
@@ -1415,6 +1482,36 @@ SumRange(struct document *Doc, f64 *Out, struct cell_block *Range)
     return Error;
 }
 
+static enum expr_error
+AverageRange(struct document *Doc, f64 *Out, struct cell_block *Range)
+{
+    Assert(Doc);
+    Assert(Out);
+    Assert(Range);
+
+    enum expr_error Error = 0;
+    s32 FirstCol = Bound(0, Range->FirstCol, Doc->Cols);
+    s32 FirstRow = Bound(0, Range->FirstRow, Doc->Rows);
+    s32 LastCol = Bound(0, Range->LastCol, Doc->Cols);
+    s32 LastRow = Bound(0, Range->LastRow, Doc->Rows);
+
+    f64 Sum = 0;
+    f64 Count = 0;
+    for (s32 Col = FirstCol; Col <= LastCol; ++Col) {
+        for (s32 Row = FirstRow; Row <= LastRow; ++Row) {
+            EvaluateCell(Doc, Col, Row);
+            struct cell *Cell = GetCell(Doc, Col, Row);
+            if (Cell->Type == CELL_NUMBER) {
+                Sum += Cell->AsNumber;
+                Count += 1;
+            }
+        }
+    }
+
+    *Out = Count? Sum / Count: 0;
+    return Error;
+}
+
 static f64
 CountRange(struct document *Doc, f64 *Out, struct cell_block *Range)
 {
@@ -1431,9 +1528,7 @@ CountRange(struct document *Doc, f64 *Out, struct cell_block *Range)
     f64 Acc = 0;
     for (s32 Col = FirstCol; Col <= LastCol; ++Col) {
         for (s32 Row = FirstRow; Row <= LastRow; ++Row) {
-            if (CellExists(Doc, Col, Row)) {
-                ++Acc;
-            }
+            ++Acc;
         }
     }
 
@@ -1659,16 +1754,12 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
             }
             else {
                 enum expr_error Err;
-                f64 Sum = 0, Count = 0;
-
-                if ((Err = SumRange(Doc, &Sum, &Right->AsRange))) {
-                    *Node = ErrorNode(Err);
-                }
-                else if ((Err = CountRange(Doc, &Count, &Right->AsRange))) {
+                f64 Average = 0;
+                if ((Err = AverageRange(Doc, &Average, &Right->AsRange))) {
                     *Node = ErrorNode(Err);
                 }
                 else {
-                    *Node = NumberNode(Count? Sum / Count: 0);
+                    *Node = NumberNode(Average);
                 }
             }
             break;
@@ -1722,7 +1813,6 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
                 else {
                     *Node = ErrorNode(ERROR_DNE);
                 }
-                DeleteDocument(SubDoc);
             }
         } break;
     InvalidDefaultCase;
@@ -1874,11 +1964,6 @@ PrintDocument(struct document *Doc)
         }
     }
 
-    /*if (Doc->Summarized)*/
-    {
-        printf("Summary cell: %d,%d\n", Doc->Summary.Col, Doc->Summary.Row);
-    }
-
     FOREACH_ROW(Doc, Row) {
         if (Row == Doc->FirstBodyRow || Row == Doc->FirstFootRow) {
 #if BRACKETED
@@ -1969,12 +2054,18 @@ main(s32 ArgCount, char **Args)
         }
 
         PrintDocument(Doc);
-
-        DeleteDocument(Doc);
-        WipeAllMem();
     }
 
-    /*PrintAllMemInfo();*/
+    for (umm Idx = 0; Idx < CacheCount; ++Idx) {
+        DeleteDocument(DocCache[Idx]);
+    }
+    free(DocCache);
+    DocCache = 0;
+
+#if PRINT_MEM_INFO
+    PrintAllMemInfo();
+#endif
+    ReleaseAllMem();
 
     return 0;
 }
