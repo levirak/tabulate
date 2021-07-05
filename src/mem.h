@@ -9,7 +9,7 @@ enum page_categories {
     TOTAL_CATEGORIES,
 };
 
-void *ReserveData(u32);
+void *ReserveData(u32 Sz);
 char *SaveStr(char *Str);
 
 void PrintAllMemInfo(void);

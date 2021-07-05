@@ -78,6 +78,10 @@ SaveStr(char *Str)
 void
 PrintAllMemInfo(void)
 {
+    char Buf[16];
+    umm TotalSize = 0;
+    umm TotalUsed = 0;
+
     printf( "\n"
             "category  this                used      size      next\n"
             "--------  ------------------  --------  --------  ------------------\n");
@@ -87,14 +91,24 @@ PrintAllMemInfo(void)
             printf("%8d  %18p\n", Idx, (void *)0);
         }
         else do {
-            char Buf[16];
             snprintf(Buf, sizeof Buf, "0x%x", This->Used);
             printf("%8d  %18p  %8s  ", Idx, This, Buf);
             snprintf(Buf, sizeof Buf, "0x%x", This->Size);
             printf("%8s  %18p\n", Buf, This->Next);
+
+            TotalSize += This->Size;
+            TotalUsed += This->Used;
         }
         while ((This = This->Next));
     }
+
+    printf("--------  ------------------  --------  --------  ------------------\n");
+    snprintf(Buf, sizeof Buf, "0x%lx", TotalUsed);
+    printf("                              %8s", Buf);
+    snprintf(Buf, sizeof Buf, "0x%lx", TotalSize);
+    printf("  %8s\n", Buf);
+    printf("                              %5lu Kb  %5lu KB\n",
+            TotalUsed / 1024, TotalSize / 1024);
 }
 
 void

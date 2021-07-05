@@ -175,6 +175,26 @@ NextCell(struct row_lexer *State, char *Buf, umm Sz)
         Type = CELL_NULL;
         break;
 
+    case '"':
+        Type = CELL_STRING;
+        ++State->Cur;
+        while (*State->Cur) {
+            if (*State->Cur == '"' || *State->Cur == '\n') {
+                ++State->Cur;
+                break;
+            }
+            else {
+                /* TODO(lrak): handle special chars in string cells */
+                if (Buf < End) *Buf++ = *State->Cur;
+                ++State->Cur;
+            }
+        }
+        while (*State->Cur == ' ') ++State->Cur;
+        Assert(*State->Cur == '\t');
+        while (*State->Cur != '\t') ++State->Cur;
+        ++State->Cur;
+        break;
+
     case '=':
         Type = CELL_EXPR;
         ++State->Cur;
@@ -398,7 +418,12 @@ MakeDocument(fd Dir, char *Path)
     EditToBaseName(Buf, sizeof Buf);
 
     if (fstatat(Dir, Path, &Stat, 0)) {
-        LogError("fstatat");
+        if (errno == ENOENT) {
+            /* nop. assume no file */
+        }
+        else {
+            LogError("fstatat(%d, \"%s\", ...)", Dir, Path);
+        }
     }
     else if ((Doc = FindExistingDoc(Stat.st_dev, Stat.st_ino))) {
         /* nop. we got the document */
@@ -467,6 +492,9 @@ MakeDocument(fd Dir, char *Path)
                         break;
                     case CELL_EXPR:
                         *Cell = ExprCell(SaveStr(CellBuf));
+                        break;
+                    case CELL_STRING:
+                        *Cell = StringCell(SaveStr(CellBuf));
                         break;
                         InvalidDefaultCase;
                     }
@@ -2052,6 +2080,7 @@ main(s32 ArgCount, char **Args)
             printf("%s: %dx%d (%dx%d)\n", Path, Doc->Cols, Doc->Rows,
                     Doc->Table.Cols, Doc->Table.Rows);
         }
+        if (Idx != 1) putchar('\n');
 
         PrintDocument(Doc);
     }
