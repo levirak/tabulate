@@ -23,6 +23,7 @@
 #define OVERDRAW_COL 0
 #define ANNOUNCE_NEW_DOCUMENT 0
 #define PRINT_MEM_INFO 0
+#define USE_UNDERLINE 1
 
 #define DEFAULT_CELL_PRECISION 2
 #define DEFAULT_CELL_WIDTH 4
@@ -35,7 +36,9 @@
 #define BRACKETED (BRACKET_CELLS || OVERDRAW_COL || OVERDRAW_ROW)
 
 
-#define ROW_SUMMARY (-1)
+#define SUMMARY (-1)
+#define UL_START "\e[4m"
+#define UL_END   "\e[24m"
 
 
 enum line_type {
@@ -379,6 +382,7 @@ ParseCellRef(struct cell_ref Cell, char **pCur, s32 *pCol, s32 *pRow)
         while (isupper(*++Cur));
     }
     else if (*Cur == '@') { HasCol = 1; ++Cur; Col = Cell.Col; }
+    else if (*Cur == '$') { HasCol = 1; ++Cur; Col = SUMMARY; }
 
     if (HasCol) {
         if (isdigit(*Cur)) {
@@ -389,7 +393,7 @@ ParseCellRef(struct cell_ref Cell, char **pCur, s32 *pCol, s32 *pRow)
         else if (*Cur == '^') { Accept = 1; ++Cur; Row = Cell.Row - 1; }
         else if (*Cur == '@') { Accept = 1; ++Cur; Row = Cell.Row; }
         else if (*Cur == '!') { Accept = 1; ++Cur; Row = Cell.Row + 1; }
-        else if (*Cur == '$') { Accept = 1; ++Cur; Row = ROW_SUMMARY; }
+        else if (*Cur == '$') { Accept = 1; ++Cur; Row = SUMMARY; }
     }
 
     if (!Accept) {
@@ -644,15 +648,22 @@ GetCellIdx(struct doc_cells *Table, s32 Col, s32 Row)
 }
 
 static s32
+CanonicalCol(struct document *Doc, s32 Col)
+{
+    if (Col == SUMMARY) {
+        Col = (Doc->Summarized)? Doc->Summary.Col: 0;
+    }
+    return Col;
+}
+
+static s32
 CanonicalRow(struct document *Doc, s32 Row)
 {
-    if (Row == ROW_SUMMARY) {
-        if (Doc->Summarized) {
-            Row = Doc->Summary.Row;
-        }
-        else {
-            Row = Bound(0, Doc->FirstFootRow, Doc->Rows - 1);
-        }
+    if (Row == SUMMARY) {
+        Row = (Doc->Summarized)
+                ? Doc->Summary.Row
+                : Bound(0, Doc->FirstFootRow, Doc->Rows - 1)
+                ;
     }
     return Row;
 }
@@ -660,6 +671,7 @@ CanonicalRow(struct document *Doc, s32 Row)
 static s32
 CellExists(struct document *Doc, s32 Col, s32 Row)
 {
+    Col = CanonicalCol(Doc, Col);
     Row = CanonicalRow(Doc, Row);
     return 0 <= Col && Col < Doc->Table.Cols
         && 0 <= Row && Row < Doc->Table.Rows;
@@ -671,6 +683,7 @@ GetCell(struct document *Doc, s32 Col, s32 Row)
     Assert(Doc);
     struct cell *Cell = 0;
 
+    Col = CanonicalCol(Doc, Col);
     Row = CanonicalRow(Doc, Row);
     if (CellExists(Doc, Col, Row)) {
         Cell = Doc->Table.Cells + GetCellIdx(&Doc->Table, Col, Row);
@@ -1995,8 +2008,18 @@ PrintDocument(struct document *Doc)
     bool IsSummarized = Doc->Summarized;
     FOREACH_ROW(Doc, Row) {
         bool IsSummaryRow = IsSummarized && Row == Doc->Summary.Row;
+        bool UnderlineRow = 0
+#if USE_UNDERLINE
+                || Row+1 == Doc->FirstBodyRow
+                || Row+1 == Doc->FirstFootRow
+#else
+                || Row == Doc->FirstBodyRow
+                || Row == Doc->FirstFootRow
+#endif
+                ;
 
-        if (Row == Doc->FirstBodyRow || Row == Doc->FirstFootRow) {
+#if !USE_UNDERLINE
+        if (UnderlineRow) {
 #if BRACKETED
             FOREACH_COL(Doc, Col) {
                 struct cell *Cell = GetCell(Doc, Col, Row);
@@ -2018,32 +2041,50 @@ PrintDocument(struct document *Doc)
 #endif
             putchar('\n');
         }
+#endif
 
         FOREACH_COL(Doc, Col) {
             struct cell *Cell = GetCell(Doc, Col, Row);
+#if USE_UNDERLINE
+            bool Underline = 0
+                    || UnderlineRow
+                    || (IsSummaryRow && Col == Doc->Summary.Col)
+                    ;
+#endif
 #if BRACKETED
+# if USE_UNDERLINE
+#  define T(A) (Underline? (A): "")
+# else
+#  define T(A) ""
+# endif
+# define X(S,...) printf(S, T(UL_START), __VA_ARGS__, T(UL_END));
             switch (Cell->Type) {
             case CELL_STRING:
-                printf("[%-*s]", Cell->Width, Cell->AsString);
+                X("[%s%-*s%s]", Cell->Width, Cell->AsString);
                 break;
             case CELL_NUMBER:
-                printf("(%'*.*f)", Cell->Width, Cell->Prcsn, Cell->AsNumber);
+                X("(%s%'*.*f%s)", Cell->Width, Cell->Prcsn, Cell->AsNumber);
                 break;
             case CELL_EXPR:
-                printf("{%-*s}", Cell->Width, Cell->AsExpr);
+                X("{%s%-*s%s}", Cell->Width, Cell->AsExpr);
                 break;
             case CELL_ERROR:
-                printf("<%-*s>", Cell->Width, CellErrStr(Cell->AsError));
+                X("<%s%-*s%s>", Cell->Width, CellErrStr(Cell->AsError));
                 break;
             case CELL_NULL:
-                putchar('!');
+                printf("!%s", T(UL_START));
                 for (s32 It = 0; It < Cell->Width; ++It) putchar('.');
-                putchar('!');
+                printf("%s!", T(UL_END));
                 break;
             InvalidDefaultCase;
             }
+# undef X
+# undef T
 #else
             if (Col != 0) printf(SEPERATOR);
+#if USE_UNDERLINE
+            if (Underline) printf(UL_START);
+#endif
             switch (Cell->Type) {
             case CELL_STRING:
                 printf("%-*s", Cell->Width, Cell->AsString);
@@ -2062,11 +2103,15 @@ PrintDocument(struct document *Doc)
                 break;
             InvalidDefaultCase;
             }
+#if USE_UNDERLINE
+            if (Underline) printf(UL_END);
+#endif
 #endif
         }
         printf("\n");
 
-        if (Doc->Summarized && Row == Doc->Summary.Row) {
+#if !USE_UNDERLINE
+        if (IsSummaryRow) {
 #if BRACKETED
             FOREACH_COL(Doc, Col) {
                 struct cell *Cell = GetCell(Doc, Col, Row);
@@ -2095,6 +2140,7 @@ PrintDocument(struct document *Doc)
 #endif
             putchar('\n');
         }
+#endif
     }
 #undef FOREACH_COL
 #undef FOREACH_ROW
