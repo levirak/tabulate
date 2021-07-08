@@ -1593,6 +1593,32 @@ IsFinal(struct expr_node *Node)
     }
 }
 
+static enum expr_error
+NodeToNumber(struct expr_node *Node, f64 Default, f64 *Out)
+{
+    Assert(Node);
+    Assert(Out);
+    enum expr_error Error = 0;
+    f64 Num = 0;
+
+    switch (Node->Type) {
+    case EN_STRING:
+        if (StrEq(Node->AsString, "")) {
+            Num = Default;
+        }
+        else {
+            Error = ERROR_TYPE;
+        }
+        break;
+    case EN_NUMBER: Num = Node->AsNumber; break;
+    case EN_ERROR:  Error = Node->AsError; break;
+    default:        Error = ERROR_TYPE; break;
+    }
+
+    *Out = Num;
+    return Error;
+}
+
 static struct expr_node *
 ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
 {
@@ -1651,32 +1677,27 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
             *Node = *Left;
         }
         else {
-            f64 Acc = 1;
-            enum expr_error Error = 0;
+            f64 Acc, Num;
+            enum expr_error Error;
 
-            switch (Left->Type) {
-            case EN_NUMBER: Acc = Left->AsNumber; break;
-            case EN_ERROR:  Error = Left->AsError; break;
-            default:        Error = ERROR_TYPE;
-                LogError("Cannot sum with type %d", Left->Type);
-                break;
-            }
-
-            struct expr_node *Cur;
-            for (Cur = Right; Cur && !Error; Cur = Cur->AsBinary.Right) {
+            Error = NodeToNumber(Left, 0, &Acc);
+            for (struct expr_node *Cur = Right; Cur && !Error; Cur = Right) {
                 Assert(Cur->Type == EN_SUM_CONT);
                 Left = ReduceNode(Doc, Cur->AsBinary.Left, Col, Row);
-                switch (Left->Type) {
-                case EN_NUMBER:
+                Right = Cur->AsBinary.Right;
+                switch ((Error = NodeToNumber(Left, 0, &Num))) {
+                default:
+                    /* silent */
+                    break;
+                case ERROR_TYPE:
+                    LogError("Cannot sum with type %d", Left->Type);
+                    break;
+                case ERROR_SUCCESS:
                     switch (Cur->AsBinary.Op) {
-                    case EN_OP_ADD: Acc += Left->AsNumber; break;
-                    case EN_OP_SUB: Acc -= Left->AsNumber; break;
+                    case EN_OP_ADD: Acc += Num; break;
+                    case EN_OP_SUB: Acc -= Num; break;
                     InvalidDefaultCase;
                     }
-                    break;
-                case EN_ERROR: Error = Left->AsError; break;
-                default:       Error = ERROR_TYPE;
-                    LogError("Cannot sum with type %d", Left->Type);
                     break;
                 }
             }
@@ -1693,32 +1714,27 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
             *Node = *Left;
         }
         else {
-            f64 Acc = 1;
-            enum expr_error Error = 0;
+            f64 Acc, Num;
+            enum expr_error Error;
 
-            switch (Left->Type) {
-            case EN_NUMBER: Acc = Left->AsNumber; break;
-            case EN_ERROR:  Error = Left->AsError; break;
-            default:        Error = ERROR_TYPE;
-                LogError("Cannot prod with type %d", Left->Type);
-                break;
-            }
-
-            struct expr_node *Cur;
-            for (Cur = Right; Cur && !Error; Cur = Cur->AsBinary.Right) {
+            Error = NodeToNumber(Left, 1, &Acc);
+            for (struct expr_node *Cur = Right; Cur && !Error; Cur = Right) {
                 Assert(Cur->Type == EN_PROD_CONT);
                 Left = ReduceNode(Doc, Cur->AsBinary.Left, Col, Row);
-                switch (Left->Type) {
-                case EN_NUMBER:
+                Right = Cur->AsBinary.Right;
+                switch ((Error = NodeToNumber(Left, 1, &Num))) {
+                default:
+                    /* silent */
+                    break;
+                case ERROR_TYPE:
+                    LogError("Cannot prod with type %d", Left->Type);
+                    break;
+                case ERROR_SUCCESS:
                     switch (Cur->AsBinary.Op) {
                     case EN_OP_MUL: Acc *= Left->AsNumber; break;
                     case EN_OP_DIV: Acc /= Left->AsNumber; break;
                     InvalidDefaultCase;
                     }
-                    break;
-                case EN_ERROR: Error = Left->AsError; break;
-                default:       Error = ERROR_TYPE;
-                    LogError("Cannot prod with type %d", Left->Type);
                     break;
                 }
             }
