@@ -41,6 +41,16 @@
 #define UL_END   "\e[24m"
 
 
+/* TODO(lrak): better macro storage */
+#define MACRO_NAME_LEN 32
+#define MACRO_BODY_LEN 128
+s32 NumMacros = 0;
+struct macro_def {
+    char Name[MACRO_NAME_LEN];
+    char Body[MACRO_BODY_LEN];
+} Macros[16] = { 0 };
+
+
 enum line_type {
     LINE_NULL = 0,
     LINE_ROW,
@@ -225,6 +235,7 @@ enum cmd_token {
 
     CT_FORMAT,
     CT_SUMMARY,
+    CT_DEFINE,
 
     CT_IDENT,
 };
@@ -233,38 +244,30 @@ struct cmd_lexer {
     char *Cur;
 };
 
-static enum cmd_token
-NextCmdToken(struct cmd_lexer *State, char *Buf, umm Sz)
+static bool
+NextCmdWord(struct cmd_lexer *State, char *Buf, umm Sz)
 {
     Assert(State);
     Assert(Buf);
     Assert(Sz > 0);
 
-    enum cmd_token Type = CT_NULL;
+    bool NotLast = 0; /* pessimistic */
     char *Cur = Buf;
     char *End = Buf + Sz - 1;
     *Cur = 0;
 
     while (isspace(*State->Cur)) ++State->Cur;
     if (*State->Cur) {
-        Type = CT_IDENT;
-
+        NotLast = 1;
         while (*State->Cur && !isspace(*State->Cur)) {
             if (Cur < End) *Cur++ = *State->Cur;
             ++State->Cur;
         }
         *Cur = 0;
 
-        if (0);
-        else if (StrEq(Buf, "fmt")) {
-            Type = CT_FORMAT;
-        }
-        else if (StrEq(Buf, "summary")) {
-            Type = CT_SUMMARY;
-        }
     }
 
-    return Type;
+    return NotLast;
 }
 
 
@@ -520,28 +523,32 @@ MakeDocument(fd Dir, char *Path)
 
             case LINE_COMMAND: {
                 char CmdBuf[512];
-                enum cmd_token Type;
                 struct cmd_lexer Lexer = { Buf };
 
                 enum {
                     STATE_FIRST = 0,
+
                     STATE_FMT,
                     STATE_SUMMARY,
+                    STATE_DEFINE,
+
                     STATE_ERROR,
                 } State = 0;
 
                 s32 ArgPos = 0;
-                while ((Type = NextCmdToken(&Lexer, CmdBuf, sizeof CmdBuf))) {
+                while (NextCmdWord(&Lexer, CmdBuf, sizeof CmdBuf)) {
 #if PREPRINT_ROWS
                     printf("(%s)", CmdBuf);
 #endif
                     switch (State) {
                     case STATE_FIRST:
-                        switch (Type) {
-                        case CT_FORMAT:  State = STATE_FMT; break;
-                        case CT_SUMMARY: State = STATE_SUMMARY; break;
-                        default:         State = STATE_ERROR; break;
-                        }
+#define MATCH(S,V) else if (StrEq(CmdBuf, S)) { State = V; }
+                        if (0);
+                        MATCH ("fmt", STATE_FMT)
+                        MATCH ("summary", STATE_SUMMARY)
+                        MATCH ("define", STATE_DEFINE)
+                        else { State = STATE_ERROR; }
+#undef MATCH
                         break;
 
                     case STATE_FMT: {
@@ -596,6 +603,35 @@ MakeDocument(fd Dir, char *Path)
                             }
                         }
 
+                        State = STATE_ERROR;
+                    } break;
+
+                    case STATE_DEFINE: {
+                        if (NumMacros >= sArrayCount(Macros)) {
+                            LogError("Too many macros defined; cann't define !%s", CmdBuf);
+                        }
+                        else {
+                            s32 Idx = NumMacros++;
+                            strncpy(Macros[Idx].Name, CmdBuf, MACRO_NAME_LEN);
+
+                            while (isspace(*Lexer.Cur)) ++Lexer.Cur;
+
+                            char *Cur = Macros[Idx].Body;
+                            char *End = Macros[Idx].Body + MACRO_BODY_LEN - 1;
+
+                            *Cur = 0;
+                            while (*Lexer.Cur) {
+                                if (Cur < End) *Cur++ = *Lexer.Cur;
+                                ++Lexer.Cur;
+                            }
+                            *Cur = 0;
+#if PREPRINT_ROWS
+                            while (Cur > Macros[Idx].Body && Cur[-1] == '\n') {
+                                *--Cur = 0;
+                            }
+                            printf("[%s]", Macros[Idx].Body);
+#endif
+                        }
                         State = STATE_ERROR;
                     } break;
 
@@ -757,12 +793,14 @@ struct expr_token {
         ET_FUNC,
         ET_CELL_REF,
         ET_NUMBER,
+        ET_MACRO,
 
         ET_UNKNOWN,
     } Type;
     union {
         enum expr_func AsFunc;
         char *AsString;
+        char *AsMacro;
         char *AsXeno;
         f64 AsNumber;
         struct cell_ref AsCell;
@@ -869,8 +907,12 @@ NextExprToken(struct expr_lexer *State, struct expr_token *Out)
             while (IsExprIdentifierChar(*State->Cur));
             *Cur = 0;
 
+            if (State->Buf[0] == '!') {
+                Out->Type = ET_MACRO;
+                Out->AsMacro = SaveStr(State->Buf + 1);
+            }
 #define X(S) StrEq(State->Buf, S)
-            if (X("sum")) {
+            else if (X("sum")) {
                 Out->Type = ET_FUNC;
                 Out->AsFunc = EF_SUM;
             }
@@ -934,6 +976,7 @@ PreTerm  := '-' Term
 Term     := Func
 Term     := Range
 Term     := Xeno
+Term     := Macro
 Term     := '(' Sum ')'
 Term     := number
 Func     := ident '(' List ')'
@@ -961,7 +1004,8 @@ struct expr_node {
 
         EN_ERROR,
         EN_NUMBER,
-        EN_IDENT,
+        EN_MACRO,
+        EN_FUNC_IDENT,
         EN_STRING,
         EN_CELL,
         EN_RANGE,
@@ -978,7 +1022,8 @@ struct expr_node {
     union {
         enum expr_error AsError;
         f64 AsNumber;
-        enum expr_func AsIdent;
+        enum expr_func AsFunc;
+        char *AsIdent;
         char *AsString;
         struct cell_ref AsCell;
         struct cell_block {
@@ -997,12 +1042,13 @@ struct expr_node {
     };
 };
 
-#define ErrorNode(V)   (struct expr_node){ EN_ERROR, .AsError = (V) }
-#define NumberNode(V)  (struct expr_node){ EN_NUMBER, .AsNumber = (V) }
-#define IdentNode(V)   (struct expr_node){ EN_IDENT, .AsIdent = (V) }
-#define StringNode(V)  (struct expr_node){ EN_STRING, .AsString = (V) }
-#define CellNode(V)    (struct expr_node){ EN_CELL, .AsCell = (V) }
-#define CellNode2(C,R) (struct expr_node){ EN_CELL, .AsCell = { (C), (R) } }
+#define ErrorNode(V)    (struct expr_node){ EN_ERROR, .AsError = (V) }
+#define NumberNode(V)   (struct expr_node){ EN_NUMBER, .AsNumber = (V) }
+#define FuncNameNode(V) (struct expr_node){ EN_FUNC_IDENT, .AsFunc = (V) }
+#define MacroNode(V)    (struct expr_node){ EN_MACRO, .AsIdent = (V) }
+#define StringNode(V)   (struct expr_node){ EN_STRING, .AsString = (V) }
+#define CellNode(V)     (struct expr_node){ EN_CELL, .AsCell = (V) }
+#define CellNode2(C,R)  (struct expr_node){ EN_CELL, .AsCell = { (C), (R) } }
 
 static struct expr_node *ParseSum(struct expr_lexer *);
 
@@ -1016,7 +1062,10 @@ NodeFromToken(struct expr_token *Token)
         *Node = NumberNode(Token->AsNumber);
         break;
     case ET_FUNC:
-        *Node = IdentNode(Token->AsFunc);
+        *Node = FuncNameNode(Token->AsFunc);
+        break;
+    case ET_MACRO:
+        *Node = MacroNode(Token->AsMacro);
         break;
     case ET_BEGIN_XENO_REF:
         *Node = StringNode(Token->AsXeno);
@@ -1268,6 +1317,9 @@ ParseTerm(struct expr_lexer *Lexer)
     case ET_NUMBER:
         Child = NodeFromToken(&Token);
         break;
+    case ET_MACRO:
+        Child = NodeFromToken(&Token);
+        break;
     default: break;
     }
 
@@ -1430,8 +1482,11 @@ PrintNode(struct expr_node *Node, s32 Depth)
         case EN_ERROR:
             printf("error %d\n", Node->AsError);
             break;
-        case EN_IDENT:
-            printf("ident %d\n", Node->AsIdent);
+        case EN_FUNC_IDENT:
+            printf("func %d\n", Node->AsFunc);
+            break;
+        case EN_MACRO:
+            printf("macro %s\n", Node->AsString);
             break;
         case EN_CELL:
             printf("cell %d,%d\n", Node->AsCell.Col, Node->AsCell.Row);
@@ -1583,7 +1638,8 @@ IsFinal(struct expr_node *Node)
     switch (NotNull(Node)->Type) {
     case EN_ERROR:
     case EN_NUMBER:
-    case EN_IDENT:
+    case EN_MACRO:
+    case EN_FUNC_IDENT:
     case EN_STRING:
     case EN_CELL:
     case EN_RANGE:
@@ -1628,11 +1684,35 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
         NotImplemented;
     case EN_ERROR:
     case EN_NUMBER:
-    case EN_IDENT:
+    case EN_FUNC_IDENT:
     case EN_STRING:
     case EN_RANGE:
         /* maximally reduced; */
         break;
+
+    case EN_MACRO: {
+        char *Body = 0;
+        for (s32 Idx = 0; !Body && Idx < NumMacros; ++Idx) {
+            if (StrEq(Macros[Idx].Name, Node->AsString)) {
+                Body = Macros[Idx].Body;
+            }
+        }
+
+        if (!Body) {
+            *Node = ErrorNode(ERROR_IMPL);
+        }
+        else {
+            char Buf[128];
+            struct expr_lexer Lexer = {
+                .Cur = Body,
+                .Ctx.CurCell = { Col, Row },
+                .Buf = Buf, .Sz = sizeof Buf,
+            };
+
+            *Node = *ReduceNode(Doc, ParseExpr(&Lexer), Col, Row);
+        }
+    } break;
+
     case EN_CELL: {
         s32 SubCol = Node->AsCell.Col;
         s32 SubRow = Node->AsCell.Row;
@@ -1764,11 +1844,12 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
         InvalidCodePath;
     case EN_FUNC:
         Left = ReduceNode(Doc, Node->AsBinary.Left, Col, Row);
-        Assert(Left->Type == EN_IDENT);
+        Assert(Left->Type == EN_FUNC_IDENT);
         Right = ReduceNode(Doc, Node->AsBinary.Right, Col, Row);
 
-        switch (Left->AsIdent) {
+        switch (Left->AsFunc) {
         InvalidDefaultCase;
+
         case EF_BODY_ROW:
             if (Right) {
                 LogError("bodyrow/0 takes 0 arguments");
@@ -1780,6 +1861,7 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
                 }};
             }
             break;
+
         case EF_SUM:
             if (!Right) {
                 LogError("sum/1 takes one argument");
@@ -1800,6 +1882,7 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
                 }
             }
             break;
+
         case EF_AVERAGE:
             if (!Right) {
                 LogError("average/1 takes one argument");
@@ -1842,6 +1925,7 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
                 }
             }
             break;
+
         }
         break;
     case EN_XENO: {
@@ -1872,7 +1956,9 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
                 }
             }
         } break;
-    InvalidDefaultCase;
+    default:
+        LogError("Got unhandeled case %d", Node->Type);
+        NotImplemented;
     }
 
     return Node;
@@ -1888,7 +1974,7 @@ EvaluateCell(struct document *Doc, s32 Col, s32 Row)
     enum expr_error Error = 0;
 
     if (Cell->Type == CELL_EXPR) {
-        char Buf[64];
+        char Buf[128];
         struct expr_lexer Lexer = {
             .Cur = Cell->AsExpr,
             .Ctx.CurCell = { Col, Row },
@@ -1921,6 +2007,7 @@ EvaluateCell(struct document *Doc, s32 Col, s32 Row)
                 case ET_DIV:            printf("/"); break;
                 case ET_COLON:          printf(":"); break;
                 case ET_NUMBER:         printf("%f", Token.AsNumber); break;
+                case ET_MACRO:          printf("!%s", Token.AsMacro); break;
 
                 case ET_FUNC:
                     switch(Token.AsFunc) {
