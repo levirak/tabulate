@@ -7,6 +7,7 @@
 #include <stdlib.h>
 
 #define PAGE_SIZE (4 * 1024)
+/*#define PAGE_SIZE (1 * 1024 * 1024)*/
 
 struct page {
     struct page *Next;

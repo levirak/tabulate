@@ -22,7 +22,7 @@
 #define OVERDRAW_ROW 0
 #define OVERDRAW_COL 0
 #define ANNOUNCE_NEW_DOCUMENT 0
-#define PRINT_MEM_INFO 0
+#define PRINT_MEM_INFO 1
 #define USE_UNDERLINE 1
 
 #define DEFAULT_CELL_PRECISION 2
@@ -42,13 +42,14 @@
 
 
 /* TODO(lrak): better macro storage */
-#define MACRO_NAME_LEN 32
-#define MACRO_BODY_LEN 128
+#define MACRO_NAME_LEN 64
+#define MACRO_BODY_LEN 192
+#define MACRO_MAX_COUNT 16
 s32 NumMacros = 0;
 struct macro_def {
     char Name[MACRO_NAME_LEN];
     char Body[MACRO_BODY_LEN];
-} Macros[16] = { 0 };
+} Macros[MACRO_MAX_COUNT] = { 0 };
 
 
 enum line_type {
@@ -112,7 +113,7 @@ enum expr_error {
     ERROR_DNE,      /* referenced cell does not exist */
     ERROR_FILE,     /* could not open sub document */
 
-    ERROR_IMPL,     /* reach an unimplemented function */
+    ERROR_IMPL,     /* reach an unimplemented function or macro */
 };
 
 struct cell {
@@ -144,6 +145,7 @@ struct cell {
         enum expr_error AsError;
     };
 };
+
 #define ErrorCell(V)  (struct cell){ .Type = CELL_ERROR, .AsError = (V) }
 #define NumberCell(V) (struct cell){ .Type = CELL_NUMBER, .AsNumber = (V) }
 #define StringCell(V) (struct cell){ .Type = CELL_STRING, .AsString = (V) }
@@ -166,7 +168,7 @@ CellErrStr(enum expr_error Error)
     case ERROR_SET:     return "E:SET";
     case ERROR_SUB:     return "E:SUB";
     case ERROR_DNE:     return "E:DNE";
-    case ERROR_FILE:    return "E:FILE";
+    case ERROR_FILE:    return "E:NOFILE";
 
     case ERROR_IMPL:    return "E:NOIMPL";
     }
@@ -607,8 +609,8 @@ MakeDocument(fd Dir, char *Path)
                     } break;
 
                     case STATE_DEFINE: {
-                        if (NumMacros >= sArrayCount(Macros)) {
-                            LogError("Too many macros defined; cann't define !%s", CmdBuf);
+                        if (NumMacros >= MACRO_MAX_COUNT) {
+                            LogError("Too many macros defined; can't define !%s", CmdBuf);
                         }
                         else {
                             s32 Idx = NumMacros++;
@@ -1650,28 +1652,45 @@ IsFinal(struct expr_node *Node)
 }
 
 static enum expr_error
-NodeToNumber(struct expr_node *Node, f64 Default, f64 *Out)
+AccumulateMathOp(f64 *Acc, enum expr_operator Op, struct expr_node *Node)
 {
+    Assert(Acc);
     Assert(Node);
-    Assert(Out);
     enum expr_error Error = 0;
-    f64 Num = 0;
 
     switch (Node->Type) {
     case EN_STRING:
         if (StrEq(Node->AsString, "")) {
-            Num = Default;
+            /* nop; treat as a the identity */
         }
         else {
             Error = ERROR_TYPE;
         }
         break;
-    case EN_NUMBER: Num = Node->AsNumber; break;
-    case EN_ERROR:  Error = Node->AsError; break;
-    default:        Error = ERROR_TYPE; break;
+
+    case EN_NUMBER:
+        switch (Op) {
+        case EN_OP_ADD: *Acc += Node->AsNumber; break;
+        case EN_OP_SUB: *Acc -= Node->AsNumber; break;
+        case EN_OP_MUL: *Acc *= Node->AsNumber; break;
+        case EN_OP_DIV: *Acc /= Node->AsNumber; break;
+        InvalidDefaultCase;
+        }
+        break;
+
+    case EN_ERROR: Error = Node->AsError; break;
+    default:
+        Error = ERROR_TYPE;
+        switch (Op) {
+        case EN_OP_ADD: LogError("Cannot add with type %d", Node->Type); break;
+        case EN_OP_SUB: LogError("Cannot subtract with type %d", Node->Type); break;
+        case EN_OP_MUL: LogError("Cannot multiply with type %d", Node->Type); break;
+        case EN_OP_DIV: LogError("Cannot divide with type %d", Node->Type); break;
+        InvalidDefaultCase;
+        }
+        break;
     }
 
-    *Out = Num;
     return Error;
 }
 
@@ -1722,7 +1741,8 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
             *Node = ErrorNode(ERROR_DNE);
         }
         else if ((Err = EvaluateCell(Doc, SubCol, SubRow))) {
-            *Node = ErrorNode(Err);
+            /**Node = ErrorNode(Err);*/
+            *Node = ErrorNode(ERROR_SUB);
         }
         else {
             SetNodeFromCell(Node, GetCell(Doc, SubCol, SubRow));
@@ -1757,32 +1777,18 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
             *Node = *Left;
         }
         else {
-            f64 Acc, Num;
             enum expr_error Error;
+            f64 Acc = 0;
 
-            Error = NodeToNumber(Left, 0, &Acc);
+            Error = AccumulateMathOp(&Acc, EN_OP_ADD, Left);
             for (struct expr_node *Cur = Right; Cur && !Error; Cur = Right) {
                 Assert(Cur->Type == EN_SUM_CONT);
                 Left = ReduceNode(Doc, Cur->AsBinary.Left, Col, Row);
                 Right = Cur->AsBinary.Right;
-                switch ((Error = NodeToNumber(Left, 0, &Num))) {
-                default:
-                    /* silent */
-                    break;
-                case ERROR_TYPE:
-                    LogError("Cannot sum with type %d", Left->Type);
-                    break;
-                case ERROR_SUCCESS:
-                    switch (Cur->AsBinary.Op) {
-                    case EN_OP_ADD: Acc += Num; break;
-                    case EN_OP_SUB: Acc -= Num; break;
-                    InvalidDefaultCase;
-                    }
-                    break;
-                }
+                Error = AccumulateMathOp(&Acc, Cur->AsBinary.Op, Left);
             }
 
-            *Node = Error? ErrorNode(ERROR_SUB): NumberNode(Acc);
+            *Node = Error? ErrorNode(Error): NumberNode(Acc);
         }
         break;
     case EN_SUM_CONT:
@@ -1794,32 +1800,18 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
             *Node = *Left;
         }
         else {
-            f64 Acc, Num;
             enum expr_error Error;
+            f64 Acc = 1;
 
-            Error = NodeToNumber(Left, 1, &Acc);
+            Error = AccumulateMathOp(&Acc, EN_OP_MUL, Left);
             for (struct expr_node *Cur = Right; Cur && !Error; Cur = Right) {
                 Assert(Cur->Type == EN_PROD_CONT);
                 Left = ReduceNode(Doc, Cur->AsBinary.Left, Col, Row);
                 Right = Cur->AsBinary.Right;
-                switch ((Error = NodeToNumber(Left, 1, &Num))) {
-                default:
-                    /* silent */
-                    break;
-                case ERROR_TYPE:
-                    LogError("Cannot prod with type %d", Left->Type);
-                    break;
-                case ERROR_SUCCESS:
-                    switch (Cur->AsBinary.Op) {
-                    case EN_OP_MUL: Acc *= Left->AsNumber; break;
-                    case EN_OP_DIV: Acc /= Left->AsNumber; break;
-                    InvalidDefaultCase;
-                    }
-                    break;
-                }
+                Error = AccumulateMathOp(&Acc, Cur->AsBinary.Op, Left);
             }
 
-            *Node = Error? ErrorNode(ERROR_SUB): NumberNode(Acc);
+            *Node = Error? ErrorNode(Error): NumberNode(Acc);
         }
         break;
     case EN_PROD_CONT:
