@@ -17,13 +17,14 @@
 #include <unistd.h>
 
 #define PREPRINT_ROWS 0
-#define PREPRINT_PARSING 0
+#define PREPRINT_PARSING 1
 #define BRACKET_CELLS 0
 #define OVERDRAW_ROW 0
 #define OVERDRAW_COL 0
 #define ANNOUNCE_NEW_DOCUMENT 0
 #define PRINT_MEM_INFO 1
 #define USE_UNDERLINE 1
+#define COLLAPSE_PARSE_TREE 1
 
 #define DEFAULT_CELL_PRECISION 2
 #define DEFAULT_CELL_WIDTH 4
@@ -776,6 +777,8 @@ enum expr_func {
     EF_SUM,
     EF_AVERAGE,
     EF_COUNT,
+    EF_ABS,
+    EF_SIGN,
 };
 
 struct expr_token {
@@ -914,22 +917,14 @@ NextExprToken(struct expr_lexer *State, struct expr_token *Out)
                 Out->AsMacro = SaveStr(State->Buf + 1);
             }
 #define X(S) StrEq(State->Buf, S)
-            else if (X("sum")) {
-                Out->Type = ET_FUNC;
-                Out->AsFunc = EF_SUM;
-            }
-            else if (X("avg") || X("average")) {
-                Out->Type = ET_FUNC;
-                Out->AsFunc = EF_AVERAGE;
-            }
-            else if (X("cnt") || X("count")) {
-                Out->Type = ET_FUNC;
-                Out->AsFunc = EF_COUNT;
-            }
-            else if (X("br") || X("bodyrow")) {
-                Out->Type = ET_FUNC;
-                Out->AsFunc = EF_BODY_ROW;
-            }
+#define MATCH(V,T) else if (T) { Out->Type = ET_FUNC; Out->AsFunc = V; }
+            MATCH (EF_SUM, X("sum"))
+            MATCH (EF_AVERAGE, X("avg") || X("average"))
+            MATCH (EF_COUNT, X("cnt") || X("count"))
+            MATCH (EF_BODY_ROW, X("br") || X("bodyrow"))
+            MATCH (EF_ABS, X("abs"))
+            MATCH (EF_SIGN, X("sign"))
+#undef MATCH
 #undef X
             else {
                 bool IsCellRef = 0;
@@ -1163,9 +1158,20 @@ ParseList(struct expr_lexer *Lexer)
             Right = NotNull(ParseListCont(Lexer));
         }
 
+#if COLLAPSE_PARSE_TREE
+        if (!Right) {
+            Node = Left;
+        }
+        else {
+            *(Node = ReserveData(sizeof *Node)) = (struct expr_node){
+                EN_LIST, .AsBinary = { Left, Right, 0 },
+            };
+        }
+#else
         *(Node = ReserveData(sizeof *Node)) = (struct expr_node){
             EN_LIST, .AsBinary = { Left, Right, 0 },
         };
+#endif
     }
 
     return Node;
@@ -1326,9 +1332,20 @@ ParseTerm(struct expr_lexer *Lexer)
     }
 
     if (Child) {
+#if COLLAPSE_PARSE_TREE
+        if (!Negate) {
+            Node = Child;
+        }
+        else {
+            *(Node = ReserveData(sizeof *Node)) = (struct expr_node){
+                EN_TERM, .AsUnary = { Child, EN_OP_NEGATIVE },
+            };
+        }
+#else
         *(Node = ReserveData(sizeof *Node)) = (struct expr_node){
             EN_TERM, .AsUnary = { Child, Negate? EN_OP_NEGATIVE: 0 },
         };
+#endif
     }
 
     return Node;
@@ -1373,9 +1390,20 @@ ParseProd(struct expr_lexer *Lexer)
             Right = NotNull(ParseProdCont(Lexer));
         }
 
+#if COLLAPSE_PARSE_TREE
+        if (!Right) {
+            Node = Left;
+        }
+        else {
+            *(Node = ReserveData(sizeof *Node)) = (struct expr_node){
+                EN_PROD, .AsBinary = { Left, Right, 0 },
+            };
+        }
+#else
         *(Node = ReserveData(sizeof *Node)) = (struct expr_node){
             EN_PROD, .AsBinary = { Left, Right, 0 },
         };
+#endif
     }
 
     return Node;
@@ -1420,9 +1448,20 @@ ParseSum(struct expr_lexer *Lexer)
             Right = NotNull(ParseSumCont(Lexer));
         }
 
+#if COLLAPSE_PARSE_TREE
+        if (!Right) {
+            Node = Left;
+        }
+        else {
+            *(Node = ReserveData(sizeof *Node)) = (struct expr_node){
+                EN_SUM, .AsBinary = { Left, Right, 0 },
+            };
+        }
+#else
         *(Node = ReserveData(sizeof *Node)) = (struct expr_node){
             EN_SUM, .AsBinary = { Left, Right, 0 },
         };
+#endif
     }
 
     return Node;
@@ -1440,9 +1479,13 @@ ParseExpr(struct expr_lexer *Lexer)
         Assert(!Node);
     }
     else {
+#if COLLAPSE_PARSE_TREE
+        Node = Child;
+#else
         *(Node = ReserveData(sizeof *Node)) = (struct expr_node){
             EN_ROOT, .AsUnary = { Child, 0 },
         };
+#endif
     }
 
     return Node;
@@ -1748,11 +1791,12 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
             SetNodeFromCell(Node, GetCell(Doc, SubCol, SubRow));
         }
     } break;
-    case EN_ROOT:
+
+    case EN_ROOT: {
         *Node = *ReduceNode(Doc, Node->AsUnary.Child, Col, Row);
-        Assert(IsFinal(Node));
-        break;
-    case EN_TERM:
+    } break;
+
+    case EN_TERM: {
         Child = ReduceNode(Doc, Node->AsUnary.Child, Col, Row);
         Assert(IsFinal(Child));
         if (Node->AsUnary.Op == EN_OP_NEGATIVE) {
@@ -1768,55 +1812,51 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
         else {
             *Node = *Child;
         }
-        Assert(IsFinal(Node));
-        break;
-    case EN_SUM:
+    } break;
+
+    case EN_SUM: {
         Left = ReduceNode(Doc, Node->AsBinary.Left, Col, Row);
         Right = Node->AsBinary.Right;
         if (!Right) {
             *Node = *Left;
         }
         else {
-            enum expr_error Error;
             f64 Acc = 0;
-
-            Error = AccumulateMathOp(&Acc, EN_OP_ADD, Left);
+            enum expr_error Error = AccumulateMathOp(&Acc, EN_OP_ADD, Left);
             for (struct expr_node *Cur = Right; Cur && !Error; Cur = Right) {
                 Assert(Cur->Type == EN_SUM_CONT);
                 Left = ReduceNode(Doc, Cur->AsBinary.Left, Col, Row);
                 Right = Cur->AsBinary.Right;
                 Error = AccumulateMathOp(&Acc, Cur->AsBinary.Op, Left);
             }
-
             *Node = Error? ErrorNode(Error): NumberNode(Acc);
         }
-        break;
-    case EN_SUM_CONT:
-        InvalidCodePath;
-    case EN_PROD:
+    } break;
+
+    case EN_SUM_CONT: InvalidCodePath;
+
+    case EN_PROD: {
         Left = ReduceNode(Doc, Node->AsBinary.Left, Col, Row);
         Right = Node->AsBinary.Right;
         if (!Right) {
             *Node = *Left;
         }
         else {
-            enum expr_error Error;
             f64 Acc = 1;
-
-            Error = AccumulateMathOp(&Acc, EN_OP_MUL, Left);
+            enum expr_error Error = AccumulateMathOp(&Acc, EN_OP_MUL, Left);
             for (struct expr_node *Cur = Right; Cur && !Error; Cur = Right) {
                 Assert(Cur->Type == EN_PROD_CONT);
                 Left = ReduceNode(Doc, Cur->AsBinary.Left, Col, Row);
                 Right = Cur->AsBinary.Right;
                 Error = AccumulateMathOp(&Acc, Cur->AsBinary.Op, Left);
             }
-
             *Node = Error? ErrorNode(Error): NumberNode(Acc);
         }
-        break;
-    case EN_PROD_CONT:
-        InvalidCodePath;
-    case EN_LIST:
+    } break;
+
+    case EN_PROD_CONT: InvalidCodePath;
+
+    case EN_LIST: {
         Assert(Node->AsBinary.Left);
         Left = ReduceNode(Doc, Node->AsBinary.Left, Col, Row);
         Right = Node->AsBinary.Right;
@@ -1831,17 +1871,16 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
             }
             while (Right);
         }
-        break;
-    case EN_LIST_CONT:
-        InvalidCodePath;
-    case EN_FUNC:
+    } break;
+
+    case EN_LIST_CONT: InvalidCodePath;
+
+    case EN_FUNC: {
         Left = ReduceNode(Doc, Node->AsBinary.Left, Col, Row);
-        Assert(Left->Type == EN_FUNC_IDENT);
         Right = ReduceNode(Doc, Node->AsBinary.Right, Col, Row);
 
+        Assert(Left->Type == EN_FUNC_IDENT);
         switch (Left->AsFunc) {
-        InvalidDefaultCase;
-
         case EF_BODY_ROW:
             if (Right) {
                 LogError("bodyrow/0 takes 0 arguments");
@@ -1895,6 +1934,7 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
                 }
             }
             break;
+
         case EF_COUNT:
             if (!Right) {
                 LogError("count/1 takes one argument");
@@ -1918,41 +1958,80 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
             }
             break;
 
-        }
-        break;
-    case EN_XENO: {
-            Left = Node->AsBinary.Left;
-            Assert(Left->Type == EN_STRING);
-            Right = Node->AsBinary.Right;
-            struct document *SubDoc = MakeDocument(Doc->Dir, Left->AsString);
-            if (!SubDoc) {
-                *Node = ErrorNode(ERROR_FILE);
+        case EF_ABS:
+            if (!Right) {
+                LogError("abs/1 takes one argument");
+                *Node = ErrorNode(ERROR_ARGC);
+            }
+            else if (Right->Type != EN_NUMBER) {
+                LogError("abs/1 takes a number");
+                *Node = ErrorNode(ERROR_TYPE);
             }
             else {
-                s32 SubCol, SubRow;
-                if (Right) {
-                    Assert(Right->Type == EN_CELL);
-                    SubCol = Right->AsCell.Col;
-                    SubRow = Right->AsCell.Row;
-                    EvaluateCell(SubDoc, SubCol, SubRow);
-                    SetNodeFromCell(Node, GetCell(SubDoc, SubCol, SubRow));
-                }
-                else if (SubDoc->Summarized) {
-                    SubCol = SubDoc->Summary.Col;
-                    SubRow = SubDoc->Summary.Row;
-                    EvaluateCell(SubDoc, SubCol, SubRow);
-                    SetNodeFromCell(Node, GetCell(SubDoc, SubCol, SubRow));
-                }
-                else {
-                    *Node = ErrorNode(ERROR_DNE);
-                }
+                Assert (Right->Type == EN_NUMBER);
+                f64 Number = Right->AsNumber;
+                *Node = NumberNode(Number < 0? -Number: Number);
             }
-        } break;
+            break;
+
+        case EF_SIGN:
+            if (!Right) {
+                LogError("sign/1 takes one argument");
+                *Node = ErrorNode(ERROR_ARGC);
+            }
+            else if (Right->Type != EN_NUMBER) {
+                LogError("sign/1 takes a number (got %d)", Right->Type);
+                *Node = ErrorNode(ERROR_TYPE);
+            }
+            else {
+                Assert (Right->Type == EN_NUMBER);
+                f64 Number = Right->AsNumber;
+                *Node = NumberNode((Number > 0)? 1: (Number < 0)? -1: 0);
+            }
+            break;
+
+        InvalidDefaultCase;
+        }
+    } break;
+
+    case EN_XENO: {
+        Left = Node->AsBinary.Left;
+        Assert(Left->Type == EN_STRING);
+        Right = Node->AsBinary.Right;
+        struct document *SubDoc = MakeDocument(Doc->Dir, Left->AsString);
+        if (!SubDoc) {
+            *Node = ErrorNode(ERROR_FILE);
+        }
+        else {
+            s32 SubCol, SubRow;
+            if (Right) {
+                Assert(Right->Type == EN_CELL);
+                SubCol = Right->AsCell.Col;
+                SubRow = Right->AsCell.Row;
+                EvaluateCell(SubDoc, SubCol, SubRow);
+                SetNodeFromCell(Node, GetCell(SubDoc, SubCol, SubRow));
+            }
+            else if (SubDoc->Summarized) {
+                SubCol = SubDoc->Summary.Col;
+                SubRow = SubDoc->Summary.Row;
+                EvaluateCell(SubDoc, SubCol, SubRow);
+                SetNodeFromCell(Node, GetCell(SubDoc, SubCol, SubRow));
+            }
+            else {
+                *Node = ErrorNode(ERROR_DNE);
+            }
+        }
+    } break;
+
     default:
         LogError("Got unhandeled case %d", Node->Type);
         NotImplemented;
     }
 
+    if (Node && !IsFinal(Node)) {
+        LogWarn("Node was not final (type %d)", Node->Type);
+        NotImplemented;
+    }
     return Node;
 }
 
@@ -2018,8 +2097,8 @@ EvaluateCell(struct document *Doc, s32 Col, s32 Row)
                 case ET_UNKNOWN: printf("?%s", Lexer.Buf); break;
                 }
             }
-            printf("\nParsed:  ");
-            Lexer.Cur = Cell->AsExpr;
+            printf("\n");
+            Lexer.Cur = Cell->AsExpr; /* reset */
 #endif
 
             struct expr_node *Node = ParseExpr(&Lexer);
@@ -2029,13 +2108,13 @@ EvaluateCell(struct document *Doc, s32 Col, s32 Row)
             }
             else {
 #if PREPRINT_PARSING
-                PrintNode(Node, 0);
+                printf("Parsed:\n");
+                PrintNode(Node, 2);
+                printf("Reduced:\n");
 #endif
                 ReduceNode(Doc, Node, Col, Row);
-                /* TODO(lrak): evaluate */
 #if PREPRINT_PARSING
-                printf("Reduced: ");
-                PrintNode(Node, 0);
+                PrintNode(Node, 2);
                 printf("\n");
 #endif
                 SetCellFromNode(Cell, Node);
@@ -2251,17 +2330,21 @@ main(s32 ArgCount, char **Args)
     for (s32 Idx = 1; Idx < ArgCount; ++Idx) {
         char *Path = Args[Idx];
 
-        struct document *Doc = NotNull(MakeDocument(AT_FDCWD, Path));
-        EvaluateDocument(Doc);
-
-        if (Idx != 1) putchar('\n');
-        if (ArgCount > 2) {
-            printf("%s: %dx%d (%dx%d)\n", Path, Doc->Cols, Doc->Rows,
-                    Doc->Table.Cols, Doc->Table.Rows);
+        struct document *Doc = MakeDocument(AT_FDCWD, Path);
+        if (!Doc) {
+            LogWarn("Could not find document %s", Path);
         }
-        if (Idx != 1) putchar('\n');
+        else {
+            EvaluateDocument(Doc);
 
-        PrintDocument(Doc);
+            if (Idx != 1) putchar('\n');
+            if (ArgCount > 2) {
+                printf("%s: %dx%d (%dx%d)\n", Path, Doc->Cols, Doc->Rows,
+                        Doc->Table.Cols, Doc->Table.Rows);
+            }
+
+            PrintDocument(Doc);
+        }
     }
 
     for (umm Idx = 0; Idx < CacheCount; ++Idx) {
