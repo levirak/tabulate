@@ -16,30 +16,37 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+/* debug */
 #define PREPRINT_ROWS 0
-#define PREPRINT_PARSING 1
+#define PREPRINT_PARSING 0
 #define BRACKET_CELLS 0
 #define OVERDRAW_ROW 0
 #define OVERDRAW_COL 0
 #define ANNOUNCE_NEW_DOCUMENT 0
-#define PRINT_MEM_INFO 1
-#define USE_UNDERLINE 1
-#define COLLAPSE_PARSE_TREE 1
+#define PRINT_MEM_INFO 0
+#define USE_FULL_PARSE_TREE 0
 
+/* params */
+#define USE_UNDERLINE 1
 #define DEFAULT_CELL_PRECISION 2
-#define DEFAULT_CELL_WIDTH 4
+#define DEFAULT_CELL_WIDTH 10
 #define MIN_CELL_WIDTH 4
 #define INIT_ROW_COUNT 16
 #define INIT_COL_COUNT 8
 #define SEPERATOR "  "
 #define INIT_DOC_CACHE_SIZE 32
 
+/* derived params */
 #define BRACKETED (BRACKET_CELLS || OVERDRAW_COL || OVERDRAW_ROW)
 
 
-#define SUMMARY (-1)
+/* constants */
 #define UL_START "\e[4m"
 #define UL_END   "\e[24m"
+#define SUMMARY (-1)
+#define PREV (-2)
+#define THIS (-3)
+#define NEXT (-4)
 
 
 /* TODO(lrak): better macro storage */
@@ -113,6 +120,7 @@ enum expr_error {
     ERROR_SUB,      /* referenced cell was an error */
     ERROR_DNE,      /* referenced cell does not exist */
     ERROR_FILE,     /* could not open sub document */
+    ERROR_RELATIVE, /* a relative reference was used improperly */
 
     ERROR_IMPL,     /* reach an unimplemented function or macro */
 };
@@ -160,18 +168,19 @@ static char *
 CellErrStr(enum expr_error Error)
 {
     switch (Error) {
-    case ERROR_SUCCESS: return "E:OK";
+    case ERROR_SUCCESS:  return "E:OK";
 
-    case ERROR_PARSE:   return "E:PARSE";
-    case ERROR_TYPE:    return "E:TYPE";
-    case ERROR_ARGC:    return "E:ARGC";
-    case ERROR_CYCLE:   return "E:CYCLE";
-    case ERROR_SET:     return "E:SET";
-    case ERROR_SUB:     return "E:SUB";
-    case ERROR_DNE:     return "E:DNE";
-    case ERROR_FILE:    return "E:NOFILE";
+    case ERROR_PARSE:    return "E:PARSE";
+    case ERROR_TYPE:     return "E:TYPE";
+    case ERROR_ARGC:     return "E:ARGC";
+    case ERROR_CYCLE:    return "E:CYCLE";
+    case ERROR_SET:      return "E:SET";
+    case ERROR_SUB:      return "E:SUB";
+    case ERROR_DNE:      return "E:DNE";
+    case ERROR_FILE:     return "E:NOFILE";
+    case ERROR_RELATIVE: return "E:RELATIVE";
 
-    case ERROR_IMPL:    return "E:NOIMPL";
+    case ERROR_IMPL:     return "E:NOIMPL";
     }
     Unreachable;
 }
@@ -370,45 +379,58 @@ fopenat(fd At, char *Path)
 }
 
 static bool
-ParseCellRef(struct cell_ref Cell, char **pCur, s32 *pCol, s32 *pRow)
+ParseCellRef(char **pCur, s32 *pCol, s32 *pRow)
 {
     Assert(pCur);
     Assert(pCol);
     Assert(pRow);
 
-    bool HasCol = 0;
     bool Accept = 0;
     char *Cur = *pCur;
     s32 Col = 0;
     s32 Row = 0;
 
     if (isupper(*Cur)) {
-        HasCol = 1;
+        Accept = 1;
         do Col = 10*Col + (*Cur - 'A');
         while (isupper(*++Cur));
     }
-    else if (*Cur == '@') { HasCol = 1; ++Cur; Col = Cell.Col; }
-    else if (*Cur == '$') { HasCol = 1; ++Cur; Col = SUMMARY; }
+    else if (*Cur == '@') { Accept = 1; ++Cur; Col = THIS; }
+    else if (*Cur == '$') { Accept = 1; ++Cur; Col = SUMMARY; }
 
-    if (HasCol) {
+    if (Accept) {
         if (isdigit(*Cur)) {
-            Accept = 1;
             do Row = 10*Row + (*Cur - '0');
             while (isdigit(*++Cur));
         }
-        else if (*Cur == '^') { Accept = 1; ++Cur; Row = Cell.Row - 1; }
-        else if (*Cur == '@') { Accept = 1; ++Cur; Row = Cell.Row; }
-        else if (*Cur == '!') { Accept = 1; ++Cur; Row = Cell.Row + 1; }
-        else if (*Cur == '$') { Accept = 1; ++Cur; Row = SUMMARY; }
+        else if (*Cur == '^') { ++Cur; Row = PREV; }
+        else if (*Cur == '@') { ++Cur; Row = THIS; }
+        else if (*Cur == '!') { ++Cur; Row = NEXT; }
+        else if (*Cur == '$') { ++Cur; Row = SUMMARY; }
+        else {
+            Accept = 0;
+            Col = 0;
+            Row = 0;
+        }
     }
 
-    if (!Accept) {
-        Col =  0; Row = 0;
-    }
     *pCol = Col;
     *pRow = Row;
     *pCur = Cur;
     return Accept;
+}
+
+static s32
+AbsoluteDim(s32 Dim, s32 This)
+{
+    switch (Dim) {
+    case PREV: Dim = This - 1; break;
+    case THIS: Dim = This; break;
+    case NEXT: Dim = This + 1; break;
+    default: break;
+    case SUMMARY: InvalidCodePath;
+    }
+    return CheckGe(Dim, 0);
 }
 
 static struct cell *ReserveCell(struct document *Doc, s32 Col, s32 Row);
@@ -596,14 +618,17 @@ MakeDocument(fd Dir, char *Path)
 
                     case STATE_SUMMARY: {
                         s32 RefCol, RefRow;
-                        struct cell_ref ThisCell = { 0, RowIdx };
                         char *Cur = CmdBuf;
-                        if (ParseCellRef(ThisCell, &Cur, &RefCol, &RefRow)) {
-                            if (!*Cur) {
-                                Doc->Summarized = 1;
-                                Doc->Summary.Col = RefCol;
-                                Doc->Summary.Row = RefRow;
-                            }
+                        if (!ParseCellRef(&Cur, &RefCol, &RefRow) || *Cur) {
+                            LogError("Could not parse cell ref [%s]", CmdBuf);
+                        }
+                        else if (RefCol == SUMMARY || RefRow == SUMMARY) {
+                            LogError("Summary cell references summary [%s]", CmdBuf);
+                        }
+                        else {
+                            Doc->Summarized = 1;
+                            Doc->Summary.Col = AbsoluteDim(RefCol, 0);
+                            Doc->Summary.Row = AbsoluteDim(RefRow, RowIdx);
                         }
 
                         State = STATE_ERROR;
@@ -687,31 +712,33 @@ GetCellIdx(struct doc_cells *Table, s32 Col, s32 Row)
 }
 
 static s32
-CanonicalCol(struct document *Doc, s32 Col)
+CanonicalCol(struct document *Doc, s32 Col, s32 ThisCol)
 {
     if (Col == SUMMARY) {
         Col = (Doc->Summarized)? Doc->Summary.Col: 0;
     }
-    return Col;
+    else {
+        Col = AbsoluteDim(Col, ThisCol);
+    }
+    return CheckGe(Col, 0);
 }
 
 static s32
-CanonicalRow(struct document *Doc, s32 Row)
+CanonicalRow(struct document *Doc, s32 Row, s32 ThisRow)
 {
     if (Row == SUMMARY) {
-        Row = (Doc->Summarized)
-                ? Doc->Summary.Row
-                : Bound(0, Doc->FirstFootRow, Doc->Rows - 1)
-                ;
+        Row = (Doc->Summarized)? Doc->Summary.Row
+                : Bound(0, Doc->FirstFootRow, Doc->Rows - 1);
     }
-    return Row;
+    else {
+        Row = AbsoluteDim(Row, ThisRow);
+    }
+    return CheckGe(Row, 0);
 }
 
 static s32
 CellExists(struct document *Doc, s32 Col, s32 Row)
 {
-    Col = CanonicalCol(Doc, Col);
-    Row = CanonicalRow(Doc, Row);
     return 0 <= Col && Col < Doc->Table.Cols
         && 0 <= Row && Row < Doc->Table.Rows;
 }
@@ -722,8 +749,6 @@ GetCell(struct document *Doc, s32 Col, s32 Row)
     Assert(Doc);
     struct cell *Cell = 0;
 
-    Col = CanonicalCol(Doc, Col);
-    Row = CanonicalRow(Doc, Row);
     if (CellExists(Doc, Col, Row)) {
         Cell = Doc->Table.Cells + GetCellIdx(&Doc->Table, Col, Row);
     }
@@ -834,10 +859,6 @@ struct expr_lexer {
     s32 NumHeld;
     struct expr_token Held[1];
 
-    struct {
-        struct cell_ref CurCell;
-    } Ctx;
-
     /* TODO(lrak): don't rely on a buffer */
     char *Buf;
     umm Sz;
@@ -931,7 +952,7 @@ NextExprToken(struct expr_lexer *State, struct expr_token *Out)
                 s32 Col, Row;
 
                 Cur = State->Buf;
-                if (ParseCellRef(State->Ctx.CurCell, &Cur, &Col, &Row)) {
+                if (ParseCellRef(&Cur, &Col, &Row)) {
                     IsCellRef = (*Cur == 0);
                 }
 
@@ -1158,7 +1179,11 @@ ParseList(struct expr_lexer *Lexer)
             Right = NotNull(ParseListCont(Lexer));
         }
 
-#if COLLAPSE_PARSE_TREE
+#if USE_FULL_PARSE_TREE
+        *(Node = ReserveData(sizeof *Node)) = (struct expr_node){
+            EN_LIST, .AsBinary = { Left, Right, 0 },
+        };
+#else
         if (!Right) {
             Node = Left;
         }
@@ -1167,10 +1192,6 @@ ParseList(struct expr_lexer *Lexer)
                 EN_LIST, .AsBinary = { Left, Right, 0 },
             };
         }
-#else
-        *(Node = ReserveData(sizeof *Node)) = (struct expr_node){
-            EN_LIST, .AsBinary = { Left, Right, 0 },
-        };
 #endif
     }
 
@@ -1332,7 +1353,11 @@ ParseTerm(struct expr_lexer *Lexer)
     }
 
     if (Child) {
-#if COLLAPSE_PARSE_TREE
+#if USE_FULL_PARSE_TREE
+        *(Node = ReserveData(sizeof *Node)) = (struct expr_node){
+            EN_TERM, .AsUnary = { Child, Negate? EN_OP_NEGATIVE: 0 },
+        };
+#else
         if (!Negate) {
             Node = Child;
         }
@@ -1341,10 +1366,6 @@ ParseTerm(struct expr_lexer *Lexer)
                 EN_TERM, .AsUnary = { Child, EN_OP_NEGATIVE },
             };
         }
-#else
-        *(Node = ReserveData(sizeof *Node)) = (struct expr_node){
-            EN_TERM, .AsUnary = { Child, Negate? EN_OP_NEGATIVE: 0 },
-        };
 #endif
     }
 
@@ -1390,7 +1411,11 @@ ParseProd(struct expr_lexer *Lexer)
             Right = NotNull(ParseProdCont(Lexer));
         }
 
-#if COLLAPSE_PARSE_TREE
+#if USE_FULL_PARSE_TREE
+        *(Node = ReserveData(sizeof *Node)) = (struct expr_node){
+            EN_PROD, .AsBinary = { Left, Right, 0 },
+        };
+#else
         if (!Right) {
             Node = Left;
         }
@@ -1399,10 +1424,6 @@ ParseProd(struct expr_lexer *Lexer)
                 EN_PROD, .AsBinary = { Left, Right, 0 },
             };
         }
-#else
-        *(Node = ReserveData(sizeof *Node)) = (struct expr_node){
-            EN_PROD, .AsBinary = { Left, Right, 0 },
-        };
 #endif
     }
 
@@ -1448,7 +1469,11 @@ ParseSum(struct expr_lexer *Lexer)
             Right = NotNull(ParseSumCont(Lexer));
         }
 
-#if COLLAPSE_PARSE_TREE
+#if USE_FULL_PARSE_TREE
+        *(Node = ReserveData(sizeof *Node)) = (struct expr_node){
+            EN_SUM, .AsBinary = { Left, Right, 0 },
+        };
+#else
         if (!Right) {
             Node = Left;
         }
@@ -1457,10 +1482,6 @@ ParseSum(struct expr_lexer *Lexer)
                 EN_SUM, .AsBinary = { Left, Right, 0 },
             };
         }
-#else
-        *(Node = ReserveData(sizeof *Node)) = (struct expr_node){
-            EN_SUM, .AsBinary = { Left, Right, 0 },
-        };
 #endif
     }
 
@@ -1479,12 +1500,12 @@ ParseExpr(struct expr_lexer *Lexer)
         Assert(!Node);
     }
     else {
-#if COLLAPSE_PARSE_TREE
-        Node = Child;
-#else
+#if USE_FULL_PARSE_TREE
         *(Node = ReserveData(sizeof *Node)) = (struct expr_node){
             EN_ROOT, .AsUnary = { Child, 0 },
         };
+#else
+        Node = Child;
 #endif
     }
 
@@ -1767,7 +1788,6 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
             char Buf[128];
             struct expr_lexer Lexer = {
                 .Cur = Body,
-                .Ctx.CurCell = { Col, Row },
                 .Buf = Buf, .Sz = sizeof Buf,
             };
 
@@ -1776,8 +1796,8 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
     } break;
 
     case EN_CELL: {
-        s32 SubCol = Node->AsCell.Col;
-        s32 SubRow = Node->AsCell.Row;
+        s32 SubCol = CanonicalCol(Doc, Node->AsCell.Col, Col);
+        s32 SubRow = CanonicalRow(Doc, Node->AsCell.Row, Row);
         enum expr_error Err = 0;
 
         if (!CellExists(Doc, SubCol, SubRow)) {
@@ -2008,8 +2028,13 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
                 Assert(Right->Type == EN_CELL);
                 SubCol = Right->AsCell.Col;
                 SubRow = Right->AsCell.Row;
-                EvaluateCell(SubDoc, SubCol, SubRow);
-                SetNodeFromCell(Node, GetCell(SubDoc, SubCol, SubRow));
+                if (SubCol < 0 || SubRow < 0) {
+                    *Node = ErrorNode(ERROR_RELATIVE);
+                }
+                else {
+                    EvaluateCell(SubDoc, SubCol, SubRow);
+                    SetNodeFromCell(Node, GetCell(SubDoc, SubCol, SubRow));
+                }
             }
             else if (SubDoc->Summarized) {
                 SubCol = SubDoc->Summary.Col;
@@ -2048,7 +2073,6 @@ EvaluateCell(struct document *Doc, s32 Col, s32 Row)
         char Buf[128];
         struct expr_lexer Lexer = {
             .Cur = Cell->AsExpr,
-            .Ctx.CurCell = { Col, Row },
             .Buf = Buf, .Sz = sizeof Buf,
         };
 
