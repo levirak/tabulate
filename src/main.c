@@ -203,20 +203,18 @@ NextCell(struct row_lexer *State, char *Buf, umm Sz)
     case '"':
         Type = CELL_STRING;
         ++State->Cur;
-        while (*State->Cur) {
-            if (*State->Cur == '"' || *State->Cur == '\n') {
-                ++State->Cur;
+        while (*State->Cur && *State->Cur != '\n') {
+            char Char = *State->Cur++;
+            if (Char == '"') {
                 break;
             }
-            else {
+            else if (Buf < End) {
                 /* TODO(lrak): handle special chars in string cells */
-                if (Buf < End) *Buf++ = *State->Cur;
-                ++State->Cur;
+                *Buf++ = Char;
             }
         }
         while (*State->Cur == ' ') ++State->Cur;
-        Assert(*State->Cur == '\t');
-        while (*State->Cur != '\t') ++State->Cur;
+        while (*State->Cur != '\t' && *State->Cur != '\n') ++State->Cur;
         ++State->Cur;
         break;
 
