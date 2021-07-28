@@ -715,10 +715,10 @@ CanonicalCol(struct document *Doc, s32 Col, s32 ThisCol)
     if (Col == SUMMARY) {
         Col = (Doc->Summarized)? Doc->Summary.Col: 0;
     }
-    else {
+    else if (ThisCol >= 0) {
         Col = AbsoluteDim(Col, ThisCol);
     }
-    return CheckGe(Col, 0);
+    return Col;
 }
 
 static s32
@@ -728,10 +728,10 @@ CanonicalRow(struct document *Doc, s32 Row, s32 ThisRow)
         Row = (Doc->Summarized)? Doc->Summary.Row
                 : Bound(0, Doc->FirstFootRow, Doc->Rows - 1);
     }
-    else {
+    else if (ThisRow >= 0) {
         Row = AbsoluteDim(Row, ThisRow);
     }
-    return CheckGe(Row, 0);
+    return Row;
 }
 
 static s32
@@ -1756,6 +1756,23 @@ AccumulateMathOp(f64 *Acc, enum expr_operator Op, struct expr_node *Node)
     return Error;
 }
 
+static void
+EvaluateIntoNode(struct document *Doc, s32 Col, s32 Row, struct expr_node *Node)
+{
+    if (Col < 0 || Row < 0) {
+        *Node = ErrorNode(ERROR_RELATIVE);
+    }
+    else if (!CellExists(Doc, Col, Row)) {
+        *Node = ErrorNode(ERROR_DNE);
+    }
+    else if (EvaluateCell(Doc, Col, Row)) {
+        *Node = ErrorNode(ERROR_SUB);
+    }
+    else {
+        SetNodeFromCell(Node, GetCell(Doc, Col, Row));
+    }
+}
+
 static struct expr_node *
 ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
 {
@@ -1796,18 +1813,7 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
     case EN_CELL: {
         s32 SubCol = CanonicalCol(Doc, Node->AsCell.Col, Col);
         s32 SubRow = CanonicalRow(Doc, Node->AsCell.Row, Row);
-        enum expr_error Err = 0;
-
-        if (!CellExists(Doc, SubCol, SubRow)) {
-            *Node = ErrorNode(ERROR_DNE);
-        }
-        else if ((Err = EvaluateCell(Doc, SubCol, SubRow))) {
-            /**Node = ErrorNode(Err);*/
-            *Node = ErrorNode(ERROR_SUB);
-        }
-        else {
-            SetNodeFromCell(Node, GetCell(Doc, SubCol, SubRow));
-        }
+        EvaluateIntoNode(Doc, SubCol, SubRow, Node);
     } break;
 
     case EN_ROOT: {
@@ -2021,28 +2027,18 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
             *Node = ErrorNode(ERROR_FILE);
         }
         else {
-            s32 SubCol, SubRow;
+            s32 SubCol = SUMMARY;
+            s32 SubRow = SUMMARY;
+
             if (Right) {
                 Assert(Right->Type == EN_CELL);
                 SubCol = Right->AsCell.Col;
                 SubRow = Right->AsCell.Row;
-                if (SubCol < 0 || SubRow < 0) {
-                    *Node = ErrorNode(ERROR_RELATIVE);
-                }
-                else {
-                    EvaluateCell(SubDoc, SubCol, SubRow);
-                    SetNodeFromCell(Node, GetCell(SubDoc, SubCol, SubRow));
-                }
             }
-            else if (SubDoc->Summarized) {
-                SubCol = SubDoc->Summary.Col;
-                SubRow = SubDoc->Summary.Row;
-                EvaluateCell(SubDoc, SubCol, SubRow);
-                SetNodeFromCell(Node, GetCell(SubDoc, SubCol, SubRow));
-            }
-            else {
-                *Node = ErrorNode(ERROR_DNE);
-            }
+
+            SubCol = CanonicalCol(SubDoc, SubCol, -1);
+            SubRow = CanonicalRow(SubDoc, SubRow, -1);
+            EvaluateIntoNode(SubDoc, SubCol, SubRow, Node);
         }
     } break;
 
