@@ -43,10 +43,11 @@
 /* constants */
 #define UL_START "\e[4m"
 #define UL_END   "\e[24m"
-#define SUMMARY (-1)
-#define PREV (-2)
-#define THIS (-3)
-#define NEXT (-4)
+#define PREV (-1)
+#define THIS (-2)
+#define NEXT (-3)
+#define SUMMARY (-4)
+#define SUB_SUMMARY (-5)
 
 
 /* TODO(lrak): better macro storage */
@@ -405,6 +406,7 @@ ParseCellRef(char **pCur, s32 *pCol, s32 *pRow)
         else if (*Cur == '@') { ++Cur; Row = THIS; }
         else if (*Cur == '!') { ++Cur; Row = NEXT; }
         else if (*Cur == '$') { ++Cur; Row = SUMMARY; }
+        else if (*Cur == '&') { ++Cur; Row = SUB_SUMMARY; }
         else {
             Accept = 0;
             Col = 0;
@@ -427,6 +429,7 @@ AbsoluteDim(s32 Dim, s32 This)
     case NEXT: Dim = This + 1; break;
     default: break;
     case SUMMARY: InvalidCodePath;
+    case SUB_SUMMARY: InvalidCodePath;
     }
     return CheckGe(Dim, 0);
 }
@@ -709,11 +712,15 @@ GetCellIdx(struct doc_cells *Table, s32 Col, s32 Row)
     return Row + Col*Table->Rows;
 }
 
+/* NOTE: may return an invalid column index */
 static s32
 CanonicalCol(struct document *Doc, s32 Col, s32 ThisCol)
 {
     if (Col == SUMMARY) {
-        Col = (Doc->Summarized)? Doc->Summary.Col: 0;
+        Col = Doc->Summarized? Doc->Summary.Col: 0;
+    }
+    else if (Col == SUB_SUMMARY) {
+        Col = Doc->Summarized? Doc->Summary.Col: 0;
     }
     else if (ThisCol >= 0) {
         Col = AbsoluteDim(Col, ThisCol);
@@ -721,12 +728,15 @@ CanonicalCol(struct document *Doc, s32 Col, s32 ThisCol)
     return Col;
 }
 
+/* NOTE: may return an invalid row index */
 static s32
 CanonicalRow(struct document *Doc, s32 Row, s32 ThisRow)
 {
     if (Row == SUMMARY) {
-        Row = (Doc->Summarized)? Doc->Summary.Row
-                : Bound(0, Doc->FirstFootRow, Doc->Rows - 1);
+        Row = Doc->Summarized? Doc->Summary.Row: Doc->FirstFootRow;
+    }
+    else if (Row == SUB_SUMMARY) {
+        Row = Doc->Summarized? Doc->Summary.Row + 1: Doc->FirstFootRow + 1;
     }
     else if (ThisRow >= 0) {
         Row = AbsoluteDim(Row, ThisRow);
@@ -839,15 +849,14 @@ static bool
 IsExprIdentifierChar(char Char)
 {
     switch (Char) {
-    default: return 0;
     case 'a' ... 'z':
     case 'A' ... 'Z':
     case '0' ... '9':
     case '_':
-    case '@':
-    case '$':
-    case '^': case '!':
+    case '$': case '&':
+    case '^': case '@': case '!':
         return 1;
+    default: return 0;
     }
 }
 
