@@ -50,17 +50,6 @@
 #define SUB_SUMMARY (-5)
 
 
-/* TODO(lrak): better macro storage */
-#define MACRO_NAME_LEN 64
-#define MACRO_BODY_LEN 192
-#define MACRO_MAX_COUNT 16
-s32 NumMacros = 0;
-struct macro_def {
-    char Name[MACRO_NAME_LEN];
-    char Body[MACRO_BODY_LEN];
-} Macros[MACRO_MAX_COUNT] = { 0 };
-
-
 enum line_type {
     LINE_NULL = 0,
     LINE_ROW,
@@ -301,6 +290,16 @@ struct document {
 
     s32 FirstBodyRow;
     s32 FirstFootRow;
+
+    /* TODO(lrak): better macro storage */
+#define MACRO_NAME_LEN 64
+#define MACRO_BODY_LEN 192
+#define MACRO_MAX_COUNT 16
+    s32 NumMacros;
+    struct macro_def {
+        char Name[MACRO_NAME_LEN];
+        char Body[MACRO_BODY_LEN];
+    } Macros[MACRO_MAX_COUNT];
 };
 
 umm CacheSize = 0;
@@ -636,17 +635,17 @@ MakeDocument(fd Dir, char *Path)
                     } break;
 
                     case STATE_DEFINE: {
-                        if (NumMacros >= MACRO_MAX_COUNT) {
+                        if (Doc->NumMacros >= MACRO_MAX_COUNT) {
                             LogError("Too many macros defined; can't define !%s", CmdBuf);
                         }
                         else {
-                            s32 Idx = NumMacros++;
-                            strncpy(Macros[Idx].Name, CmdBuf, MACRO_NAME_LEN);
+                            s32 Idx = Doc->NumMacros++;
+                            strncpy(Doc->Macros[Idx].Name, CmdBuf, MACRO_NAME_LEN);
 
                             while (isspace(*Lexer.Cur)) ++Lexer.Cur;
 
-                            char *Cur = Macros[Idx].Body;
-                            char *End = Macros[Idx].Body + MACRO_BODY_LEN - 1;
+                            char *Cur = Doc->Macros[Idx].Body;
+                            char *End = Doc->Macros[Idx].Body + MACRO_BODY_LEN - 1;
 
                             *Cur = 0;
                             while (*Lexer.Cur) {
@@ -1799,9 +1798,9 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
 
     case EN_MACRO: {
         char *Body = 0;
-        for (s32 Idx = 0; !Body && Idx < NumMacros; ++Idx) {
-            if (StrEq(Macros[Idx].Name, Node->AsString)) {
-                Body = Macros[Idx].Body;
+        for (s32 Idx = 0; !Body && Idx < Doc->NumMacros; ++Idx) {
+            if (StrEq(Doc->Macros[Idx].Name, Node->AsString)) {
+                Body = Doc->Macros[Idx].Body;
             }
         }
 
