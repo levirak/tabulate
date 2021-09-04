@@ -18,13 +18,13 @@
 
 /* debug */
 #define PREPRINT_ROWS 0
-#define PREPRINT_PARSING 0
+#define PREPRINT_PARSING 1
 #define BRACKET_CELLS 0
 #define OVERDRAW_ROW 0
 #define OVERDRAW_COL 0
 #define ANNOUNCE_NEW_DOCUMENT 0
 #define PRINT_MEM_INFO 0
-#define USE_FULL_PARSE_TREE 0
+#define USE_FULL_PARSE_TREE 1
 
 /* params */
 #define USE_UNDERLINE 1
@@ -1914,13 +1914,20 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
         Assert(Left->Type == EN_FUNC_IDENT);
         switch (Left->AsFunc) {
         case EF_BODY_ROW:
-            if (Right) {
-                LogError("bodyrow/0 takes 0 arguments");
-                *Node = ErrorNode(ERROR_ARGC);
+            if (!Right) {
+                *Node = (struct expr_node){ EN_RANGE, .AsRange = {
+                    Col, Doc->FirstBodyRow,
+                    Col, Doc->FirstFootRow - 1,
+                }};
+            }
+            else if (Right->Type != EN_NUMBER) {
+                LogError("bodyrow/1 takes a number");
+                *Node = ErrorNode(ERROR_TYPE);
             }
             else {
                 *Node = (struct expr_node){ EN_RANGE, .AsRange = {
-                    Col, Doc->FirstBodyRow, Col, Doc->FirstFootRow - 1,
+                    (s32)Right->AsNumber, Doc->FirstBodyRow,
+                    (s32)Right->AsNumber, Doc->FirstFootRow - 1,
                 }};
             }
             break;
