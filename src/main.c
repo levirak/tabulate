@@ -1696,7 +1696,8 @@ CountRange(struct document *Doc, f64 *Out, struct cell_block *Range)
     f64 Acc = 0;
     for (s32 Col = FirstCol; Col <= LastCol; ++Col) {
         for (s32 Row = FirstRow; Row <= LastRow; ++Row) {
-            ++Acc;
+            EvaluateCell(Doc, Col, Row);
+            Acc += (GetCell(Doc, Col, Row)->Type == CELL_NUMBER);
         }
     }
 
