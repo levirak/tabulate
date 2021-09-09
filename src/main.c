@@ -18,13 +18,13 @@
 
 /* debug */
 #define PREPRINT_ROWS 0
-#define PREPRINT_PARSING 1
+#define PREPRINT_PARSING 0
 #define BRACKET_CELLS 0
 #define OVERDRAW_ROW 0
 #define OVERDRAW_COL 0
 #define ANNOUNCE_NEW_DOCUMENT 0
 #define PRINT_MEM_INFO 0
-#define USE_FULL_PARSE_TREE 1
+#define USE_FULL_PARSE_TREE 0
 
 /* params */
 #define USE_UNDERLINE 1
@@ -47,7 +47,7 @@
 #define THIS (-2)
 #define NEXT (-3)
 #define SUMMARY (-4)
-#define SUB_SUMMARY (-5)
+#define FOOT0 (-5) /* NOTE: must be lowest valued constant */
 
 
 enum line_type {
@@ -394,18 +394,22 @@ ParseCellRef(char **pCur, s32 *pCol, s32 *pRow)
         while (isupper(*++Cur));
     }
     else if (*Cur == '@') { Accept = 1; ++Cur; Col = THIS; }
-    else if (*Cur == '$') { Accept = 1; ++Cur; Col = SUMMARY; }
 
     if (Accept) {
         if (isdigit(*Cur)) {
             do Row = 10*Row + (*Cur - '0');
             while (isdigit(*++Cur));
         }
+        else if (*Cur == '$') {
+            ;
+            for (++Cur; isdigit(*Cur); ++Cur) {
+                Row = 10*Row + (*Cur - '0');
+            }
+            Row = FOOT0 - Row;
+        }
         else if (*Cur == '^') { ++Cur; Row = PREV; }
         else if (*Cur == '@') { ++Cur; Row = THIS; }
         else if (*Cur == '!') { ++Cur; Row = NEXT; }
-        else if (*Cur == '$') { ++Cur; Row = SUMMARY; }
-        else if (*Cur == '&') { ++Cur; Row = SUB_SUMMARY; }
         else {
             Accept = 0;
             Col = 0;
@@ -422,13 +426,11 @@ ParseCellRef(char **pCur, s32 *pCol, s32 *pRow)
 static s32
 AbsoluteDim(s32 Dim, s32 This)
 {
-    switch (Dim) {
+    if (Dim < 0) switch (Dim) {
     case PREV: Dim = This - 1; break;
     case THIS: Dim = This; break;
     case NEXT: Dim = This + 1; break;
-    default: break;
-    case SUMMARY: InvalidCodePath;
-    case SUB_SUMMARY: InvalidCodePath;
+    InvalidDefaultCase;
     }
     return CheckGe(Dim, 0);
 }
@@ -718,9 +720,6 @@ CanonicalCol(struct document *Doc, s32 Col, s32 ThisCol)
     if (Col == SUMMARY) {
         Col = Doc->Summarized? Doc->Summary.Col: 0;
     }
-    else if (Col == SUB_SUMMARY) {
-        Col = Doc->Summarized? Doc->Summary.Col: 0;
-    }
     else if (ThisCol >= 0) {
         Col = AbsoluteDim(Col, ThisCol);
     }
@@ -734,8 +733,8 @@ CanonicalRow(struct document *Doc, s32 Row, s32 ThisRow)
     if (Row == SUMMARY) {
         Row = Doc->Summarized? Doc->Summary.Row: Doc->FirstFootRow;
     }
-    else if (Row == SUB_SUMMARY) {
-        Row = Doc->Summarized? Doc->Summary.Row + 1: Doc->FirstFootRow + 1;
+    else if (Row <= FOOT0) {
+        Row = Doc->FirstFootRow + (FOOT0 - Row);
     }
     else if (ThisRow >= 0) {
         Row = AbsoluteDim(Row, ThisRow);
@@ -852,7 +851,7 @@ IsExprIdentifierChar(char Char)
     case 'A' ... 'Z':
     case '0' ... '9':
     case '_':
-    case '$': case '&':
+    case '$':
     case '^': case '@': case '!':
         return 1;
     default: return 0;
@@ -1606,8 +1605,9 @@ PrintNode(struct expr_node *Node, s32 Depth)
             break;
         case EN_RANGE:
             printf("Range:\n");
-            PrintNode(Node->AsBinary.Left, NextDepth);
-            PrintNode(Node->AsBinary.Right, NextDepth);
+            printf("Range %d,%d -- %d,%d\n",
+                    Node->AsRange.FirstCol, Node->AsRange.FirstRow,
+                    Node->AsRange.LastCol, Node->AsRange.LastRow);
             break;
         case EN_XENO:
             printf("Xeno:\n");
@@ -1793,8 +1793,15 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
     case EN_NUMBER:
     case EN_FUNC_IDENT:
     case EN_STRING:
+        /* maximally reduced */
+        break;
+
     case EN_RANGE:
-        /* maximally reduced; */
+        /* needs to be canonicalized */
+        Node->AsRange.FirstCol = CanonicalCol(Doc, Node->AsRange.FirstCol, Col);
+        Node->AsRange.FirstRow = CanonicalRow(Doc, Node->AsRange.FirstRow, Row);
+        Node->AsRange.LastCol = CanonicalCol(Doc, Node->AsRange.LastCol, Col);
+        Node->AsRange.LastRow = CanonicalRow(Doc, Node->AsRange.LastRow, Row);
         break;
 
     case EN_MACRO: {
