@@ -26,9 +26,8 @@ Str2f64(char *Str, char **Rhs)
     }
 
     while (isdigit(*Str)) {
-        Assert(*Str);
         Num = 10*Num + (*Str++ - '0');
-        if (*Str == ',') ++Str;
+        if (Str[0] == ',') ++Str;
     }
 
     if (*Str == '.') {

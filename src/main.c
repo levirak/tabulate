@@ -825,7 +825,7 @@ struct expr_token {
         ET_MULT,
         ET_DIV,
         ET_COLON,
-        ET_COMMA,
+        ET_LIST_SEP,
         ET_BEGIN_XENO_REF,
         ET_END_XENO_REF,
         ET_FUNC,
@@ -907,7 +907,7 @@ NextExprToken(struct expr_lexer *State, struct expr_token *Out)
         case '*': ++State->Cur; Out->Type = ET_MULT; break;
         case '/': ++State->Cur; Out->Type = ET_DIV; break;
         case ':': ++State->Cur; Out->Type = ET_COLON; break;
-        case ',': ++State->Cur; Out->Type = ET_COMMA; break;
+        case ';': ++State->Cur; Out->Type = ET_LIST_SEP; break;
 
         case '{':
             ++State->Cur;
@@ -1158,12 +1158,12 @@ ParseListCont(struct expr_lexer *Lexer)
     struct expr_token Token;
 
     NextExprToken(Lexer, &Token);
-    if (Token.Type != ET_COMMA) {
-        LogError("Expected a ',' token");
+    if (Token.Type != ET_LIST_SEP) {
+        LogError("Expected a ';' token");
     }
     else if (!(Left = ParseSum(Lexer))) { /* nop */ }
     else {
-        if (PeekExprToken(Lexer, &Token) == ET_COMMA) {
+        if (PeekExprToken(Lexer, &Token) == ET_LIST_SEP) {
             Right = NotNull(ParseListCont(Lexer));
         }
 
@@ -1183,7 +1183,7 @@ ParseList(struct expr_lexer *Lexer)
 
     if (!(Left = ParseSum(Lexer))) { /* nop */ }
     else {
-        if (PeekExprToken(Lexer, &Token) == ET_COMMA) {
+        if (PeekExprToken(Lexer, &Token) == ET_LIST_SEP) {
             Right = NotNull(ParseListCont(Lexer));
         }
 
@@ -2151,10 +2151,13 @@ EvaluateCell(struct document *Doc, s32 Col, s32 Row)
             while (NextExprToken(&Lexer, &Token)) {
                 printf(" ");
                 switch (Token.Type) {
-                    InvalidDefaultCase;
+                default:
+                    LogError("Encountered unsupported type %d", Token.Type);
+                    NotImplemented;
 
                 case ET_LEFT_PAREN:     printf("("); break;
                 case ET_RIGHT_PAREN:    printf(")"); break;
+                case ET_LIST_SEP:       printf(";"); break;
                 case ET_BEGIN_XENO_REF: printf("{%s:", Token.AsXeno); break;
                 case ET_END_XENO_REF:   printf("}"); break;
                 case ET_PLUS:           printf("+"); break;
@@ -2171,9 +2174,9 @@ EvaluateCell(struct document *Doc, s32 Col, s32 Row)
                     case EF_SUM:      printf("sum/1"); break;
                     case EF_AVERAGE:  printf("average/1"); break;
                     case EF_COUNT:    printf("count/1"); break;
-                    case EF_ABS:      printnf("abs/1"); break;
-                    case EF_SIGN:     printnf("sign/1"); break;
-                    case EF_NUMBER:   printnf("number/+"); break;
+                    case EF_ABS:      printf("abs/1"); break;
+                    case EF_SIGN:     printf("sign/1"); break;
+                    case EF_NUMBER:   printf("number/+"); break;
                     InvalidDefaultCase;
                     }
                     break;
