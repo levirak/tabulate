@@ -15,6 +15,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <math.h>
 
 /* debug */
 #define PREPRINT_ROWS 0
@@ -810,6 +811,7 @@ enum expr_func {
     EF_COUNT,
     EF_ABS,
     EF_SIGN,
+    EF_NUMBER,
 };
 
 struct expr_token {
@@ -950,6 +952,7 @@ NextExprToken(struct expr_lexer *State, struct expr_token *Out)
             MATCH (EF_BODY_ROW, X("br") || X("bodyrow"))
             MATCH (EF_ABS, X("abs"))
             MATCH (EF_SIGN, X("sign"))
+            MATCH (EF_NUMBER, X("number"))
 #undef MATCH
 #undef X
             else {
@@ -1716,6 +1719,8 @@ IsFinal(struct expr_node *Node)
     case EN_STRING:
     case EN_CELL:
     case EN_RANGE:
+    case EN_LIST:
+    case EN_LIST_CONT:
         return 1;
     default:
         return 0;
@@ -1726,13 +1731,18 @@ static enum expr_error
 AccumulateMathOp(f64 *Acc, enum expr_operator Op, struct expr_node *Node)
 {
     Assert(Acc);
-    Assert(Node);
     enum expr_error Error = 0;
 
-    switch (Node->Type) {
+    switch (NotNull(Node)->Type) {
     case EN_STRING:
         if (StrEq(Node->AsString, "")) {
-            /* nop; treat as a the identity */
+            /* treat as equivalent to 0, For add/sub, this has no effect. For
+             * mul/div, this sets the accumulator to 0 */
+            switch (Op) {
+            case EN_OP_MUL: *Acc = 0; break;
+            case EN_OP_DIV: *Acc = 0; break;
+            default: break;
+            }
         }
         else {
             Error = ERROR_TYPE;
@@ -2037,6 +2047,40 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
             }
             break;
 
+        case EF_NUMBER:
+            if (!Right) {
+                LogError("number/+ takes at least one argument");
+                *Node = ErrorNode(ERROR_ARGC);
+            }
+            else {
+                f64 Number = 0;
+                struct expr_node *This = Node;
+                for (struct expr_node *Next = 0; This; This = Next) {
+                    struct expr_node *Element;
+                    switch (Right->Type) {
+                    case EN_LIST:
+                    case EN_LIST_CONT:
+                        Element = This->AsBinary.Left;
+                        Next = This->AsBinary.Right;
+                        break;
+                    default:
+                        Element = This;
+                        Next = 0;
+                    }
+
+                    if (Element->Type == EN_NUMBER) {
+                        if (isnan(Element->AsNumber)) { /* ignored */ }
+                        else if (isinf(Element->AsNumber)) { /* ignored */ }
+                        else {
+                            Number = Element->AsNumber;
+                            Next = 0; /* early out of this loop */
+                        }
+                    }
+                }
+                *Node = NumberNode(Number);
+            }
+            break;
+
         InvalidDefaultCase;
         }
     } break;
@@ -2123,10 +2167,13 @@ EvaluateCell(struct document *Doc, s32 Col, s32 Row)
 
                 case ET_FUNC:
                     switch(Token.AsFunc) {
-                    case EF_BODY_ROW: printf("bodyrow/0"); break;
+                    case EF_BODY_ROW: printf("bodyrow/0,1"); break;
                     case EF_SUM:      printf("sum/1"); break;
                     case EF_AVERAGE:  printf("average/1"); break;
                     case EF_COUNT:    printf("count/1"); break;
+                    case EF_ABS:      printnf("abs/1"); break;
+                    case EF_SIGN:     printnf("sign/1"); break;
+                    case EF_NUMBER:   printnf("number/+"); break;
                     InvalidDefaultCase;
                     }
                     break;
