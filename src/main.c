@@ -116,7 +116,7 @@ enum expr_error {
     ERROR_IMPL,     /* reach an unimplemented function or macro */
 };
 
-struct cell {
+struct fmt_header {
     enum cell_alignment {
         ALIGN_DEFAULT = 0,
         ALIGN_RIGHT,
@@ -124,6 +124,36 @@ struct cell {
     } Align: 8;
     u8 Width;
     u8 Prcsn;
+    enum {
+        SET_ALIGN = 0x01,
+        SET_WIDTH = 0x02,
+        SET_PRCSN = 0x04,
+        /* SET_ = 0x08, */
+        /* SET_ = 0x10, */
+        /* SET_ = 0x20, */
+        /* SET_ = 0x40, */
+        /* SET_ = 0x80, */
+        SET_NONE = 0,
+        SET_ALL = 0xff,
+    } SetMask: 8;
+};
+#define DEFAULT_HEADER ((struct fmt_header){ 0, DEFAULT_CELL_WIDTH, DEFAULT_CELL_WIDTH, SET_ALL })
+static struct fmt_header DefaultHeader = DEFAULT_HEADER;
+
+static struct fmt_header *
+MergeHeader(struct fmt_header *Dst, struct fmt_header *Src)
+{
+#define X(F,M) if (!(Dst->SetMask & F)) { Dst->M = Src->M; }
+    X(SET_ALIGN, Align);
+    X(SET_WIDTH, Width);
+    X(SET_PRCSN, Prcsn);
+#undef X
+    Dst->SetMask |= Src->SetMask;
+    return Dst;
+}
+
+struct cell {
+    struct fmt_header Fmt;
 
     enum cell_type {
         CELL_NULL = 0,
@@ -135,8 +165,8 @@ struct cell {
         CELL_ERROR,
     } Type;
     enum cell_state {
-        STATE_STABLE = 0,
-        STATE_EVALUATING,
+        CELL_STATE_STABLE = 0,
+        CELL_STATE_EVALUATING,
     } State;
     union {
         char *AsString;
@@ -146,10 +176,15 @@ struct cell {
     };
 };
 
-#define ErrorCell(V)  (struct cell){ .Type = CELL_ERROR, .AsError = (V) }
-#define NumberCell(V) (struct cell){ .Type = CELL_NUMBER, .AsNumber = (V) }
-#define StringCell(V) (struct cell){ .Type = CELL_STRING, .AsString = (V) }
-#define ExprCell(V)   (struct cell){ .Type = CELL_EXPR, .AsExpr = (V) }
+#define ERROR_CELL(V)  (struct cell){ .Type = CELL_ERROR, .AsError = (V) }
+#define NUMBER_CELL(V) (struct cell){ .Type = CELL_NUMBER, .AsNumber = (V) }
+#define STRING_CELL(V) (struct cell){ .Type = CELL_STRING, .AsString = (V) }
+#define EXPR_CELL(V)   (struct cell){ .Type = CELL_EXPR, .AsExpr = (V) }
+
+static void SetAsError(struct cell *C, enum expr_error V) { C->Type = CELL_ERROR; C->AsError = V; }
+static void SetAsNumber(struct cell *C, f64 V) { C->Type = CELL_NUMBER; C->AsNumber = V; }
+static void SetAsString(struct cell *C, char *V) { C->Type = CELL_STRING; C->AsString = V; }
+static void SetAsExpr(struct cell *C, char *V) { C->Type = CELL_EXPR; C->AsExpr = V; }
 
 struct row_lexer {
     char *Cur;
@@ -436,6 +471,7 @@ AbsoluteDim(s32 Dim, s32 This)
     return CheckGe(Dim, 0);
 }
 
+static struct cell *GetCell(struct document *Doc, s32 Col, s32 Row);
 static struct cell *ReserveCell(struct document *Doc, s32 Col, s32 Row);
 
 static struct document *
@@ -483,6 +519,7 @@ MakeDocument(fd Dir, char *Path)
 #endif
 
         s32 RowIdx = 0;
+        s32 FmtIdx = -1;
         enum line_type LineType;
         while ((LineType = ReadLine(File, Buf, sizeof Buf))) {
 #if PREPRINT_ROWS
@@ -494,9 +531,8 @@ MakeDocument(fd Dir, char *Path)
             case LINE_COMMENT: Prefix = "REM"; break;
                             InvalidDefaultCase;
             }
-            printf("%s.", Prefix);
+            printf("%s%c", Prefix, FmtIdx < 0? '.': '!');
 #endif
-
             switch (LineType) {
             case LINE_EMPTY:
                 if (Doc->FirstBodyRow == 0) {
@@ -505,6 +541,7 @@ MakeDocument(fd Dir, char *Path)
                 else {
                     Doc->FirstFootRow = RowIdx;
                 }
+                FmtIdx = -1;
                 break;
 
             case LINE_ROW: {
@@ -519,17 +556,17 @@ MakeDocument(fd Dir, char *Path)
                         char *Rem; double Value;
                     case CELL_PRETYPED:
                         if (*CellBuf && (Value = Str2f64(CellBuf, &Rem), !*Rem)) {
-                            *Cell = NumberCell(Value);
+                            SetAsNumber(Cell, Value);
                         }
                         else {
-                            *Cell = StringCell(SaveStr(CellBuf));
+                            SetAsString(Cell, SaveStr(CellBuf));
                         }
                         break;
                     case CELL_EXPR:
-                        *Cell = ExprCell(SaveStr(CellBuf));
+                        SetAsExpr(Cell, SaveStr(CellBuf));
                         break;
                     case CELL_STRING:
-                        *Cell = StringCell(SaveStr(CellBuf));
+                        SetAsString(Cell, SaveStr(CellBuf));
                         break;
                         InvalidDefaultCase;
                     }
@@ -540,10 +577,17 @@ MakeDocument(fd Dir, char *Path)
                     case CELL_EXPR:   printf("{%s}", Cell->AsExpr); break;
                     case CELL_ERROR:  printf("<%s>", CellErrStr(Cell->AsError)); break;
                     default:
-                                    LogWarn("Preprint wants to print type %d", Cell->Type);
-                                    InvalidCodePath;
+                        LogWarn("Preprint wants to print type %d", Cell->Type);
+                        InvalidCodePath;
                     }
 #endif
+
+                    if (FmtIdx >= 0 && FmtIdx != RowIdx) {
+                        struct cell *FmtCell;
+                        FmtCell = NotNull(GetCell(Doc, ColIdx, FmtIdx));
+                        MergeHeader(&Cell->Fmt, &FmtCell->Fmt);
+                    }
+
                     ++ColIdx;
                 }
                 ++RowIdx;
@@ -557,6 +601,7 @@ MakeDocument(fd Dir, char *Path)
                     STATE_FIRST = 0,
 
                     STATE_FMT,
+                    STATE_PRCSN,
                     STATE_SUMMARY,
                     STATE_DEFINE,
 
@@ -570,9 +615,10 @@ MakeDocument(fd Dir, char *Path)
 #endif
                     switch (State) {
                     case STATE_FIRST:
-#define MATCH(S,V) else if (StrEq(CmdBuf, S)) { State = V; }
+#define MATCH(S,V,...) else if (StrEq(CmdBuf, S)) { State = V; __VA_ARGS__; }
                         if (0);
                         MATCH ("fmt", STATE_FMT)
+                        MATCH ("prcsn", STATE_PRCSN, FmtIdx = RowIdx)
                         MATCH ("summary", STATE_SUMMARY)
                         MATCH ("define", STATE_DEFINE)
                         else { State = STATE_ERROR; }
@@ -580,9 +626,7 @@ MakeDocument(fd Dir, char *Path)
                         break;
 
                     case STATE_FMT: {
-                        enum cell_alignment Align = 0;
-                        u8 Width = DEFAULT_CELL_WIDTH;
-                        u8 Prcsn = DEFAULT_CELL_PRECISION;
+                        struct fmt_header New = DEFAULT_HEADER;
                         char *Cur = CmdBuf;
 
                         /* TODO(lrak): real parser? */
@@ -592,30 +636,56 @@ MakeDocument(fd Dir, char *Path)
                         }
                         else {
                             switch (*Cur) {
-                            case 'l': ++Cur; Align = ALIGN_LEFT; break;
-                            case 'r': ++Cur; Align = ALIGN_RIGHT; break;
+                            case 'l': ++Cur; New.Align = ALIGN_LEFT; break;
+                            case 'r': ++Cur; New.Align = ALIGN_RIGHT; break;
                             }
 
                             if (isdigit(*Cur)) {
-                                Width = 0;
-                                do Width = 10*Width + (*Cur++ - '0');
-                                while (isdigit(*Cur));
+                                New.Width = 0;
+                                do New.Width = 10*New.Width + (*Cur-'0');
+                                while (isdigit(*++Cur));
                             }
 
                             if (*Cur == '.') {
                                 ++Cur;
                                 if (isdigit(*Cur)) {
-                                    Prcsn = 0;
-                                    do Prcsn = 10*Prcsn + (*Cur++ - '0');
-                                    while (isdigit(*Cur));
+                                    New.Prcsn = 0;
+                                    do New.Prcsn = 10*New.Prcsn + (*Cur-'0');
+                                    while (isdigit(*++Cur));
                                 }
                             }
 
                             struct cell *TopCell;
                             TopCell = ReserveCell(Doc, ArgPos-1, 0);
-                            TopCell->Align = Align;
-                            TopCell->Width = Width;
-                            TopCell->Prcsn = Prcsn;
+                            MergeHeader(&TopCell->Fmt, &New);
+                        }
+                    } break;
+
+                    case STATE_PRCSN: {
+                        Assert(FmtIdx == RowIdx);
+                        u8 Prcsn = DEFAULT_CELL_PRECISION;
+                        char *Cur = CmdBuf;
+
+                        /* TODO(lrak): real parser? */
+
+                        if (StrEq(Cur, "-")) {
+                            /* do not set this column */
+                        }
+                        if (StrEq(Cur, "reset")) {
+                            FmtIdx = -1;
+                            State = STATE_ERROR;
+                        }
+                        else {
+                            if (isdigit(*Cur)) {
+                                Prcsn = 0;
+                                do Prcsn = 10*Prcsn + (*Cur-'0');
+                                while (isdigit(*++Cur));
+                            }
+
+                            struct cell *Cell;
+                            Cell = ReserveCell(Doc, ArgPos-1, FmtIdx);
+                            Cell->Fmt.Prcsn = Prcsn;
+                            Cell->Fmt.SetMask |= SET_PRCSN;
                         }
                     } break;
 
@@ -657,10 +727,10 @@ MakeDocument(fd Dir, char *Path)
                             }
                             *Cur = 0;
 #if PREPRINT_ROWS
-                            while (Cur > Macros[Idx].Body && Cur[-1] == '\n') {
+                            while (Cur > Doc->Macros[Idx].Body && Cur[-1] == '\n') {
                                 *--Cur = 0;
                             }
-                            printf("[%s]", Macros[Idx].Body);
+                            printf("[%s]", Doc->Macros[Idx].Body);
 #endif
                         }
                         State = STATE_ERROR;
@@ -1105,7 +1175,7 @@ NodeFromToken(struct expr_token *Token)
 }
 
 static struct expr_node *
-SetNodeFromCell(struct expr_node *Node, struct cell *Cell)
+SetAsNodeFrom(struct expr_node *Node, struct cell *Cell)
 {
     Assert(Node);
     Assert(Cell);
@@ -1124,7 +1194,7 @@ SetNodeFromCell(struct expr_node *Node, struct cell *Cell)
 }
 
 static struct cell *
-SetCellFromNode(struct cell *Out, struct expr_node *Node)
+SetAsFromNode(struct cell *Out, struct expr_node *Node)
 {
     Assert(Node);
 
@@ -1788,7 +1858,7 @@ EvaluateIntoNode(struct document *Doc, s32 Col, s32 Row, struct expr_node *Node)
         *Node = ErrorNode(ERROR_SUB);
     }
     else {
-        SetNodeFromCell(Node, GetCell(Doc, Col, Row));
+        SetAsNodeFrom(Node, GetCell(Doc, Col, Row));
     }
 }
 
@@ -2137,11 +2207,11 @@ EvaluateCell(struct document *Doc, s32 Col, s32 Row)
             .Buf = Buf, .Sz = sizeof Buf,
         };
 
-        if (Cell->State == STATE_EVALUATING) {
+        if (Cell->State == CELL_STATE_EVALUATING) {
             Error = ERROR_CYCLE;
         }
         else {
-            Cell->State = STATE_EVALUATING;
+            Cell->State = CELL_STATE_EVALUATING;
 
 #if PREPRINT_PARSING
             struct expr_token Token;
@@ -2195,7 +2265,7 @@ EvaluateCell(struct document *Doc, s32 Col, s32 Row)
             struct expr_node *Node = ParseExpr(&Lexer);
             if (!Node) {
                 LogWarn("Failed to parse cell %d,%d", Col, Row);
-                *Cell = ErrorCell(ERROR_PARSE);
+                SetAsError(Cell, ERROR_PARSE);
             }
             else {
 #if PREPRINT_PARSING
@@ -2208,10 +2278,10 @@ EvaluateCell(struct document *Doc, s32 Col, s32 Row)
                 PrintNode(Node, 2);
                 printf("\n");
 #endif
-                SetCellFromNode(Cell, Node);
+                SetAsFromNode(Cell, Node);
             }
 
-            Cell->State = STATE_STABLE;
+            Cell->State = CELL_STATE_STABLE;
         }
     }
 
@@ -2258,15 +2328,14 @@ PrintDocument(struct document *Doc)
         struct cell *TopCell = GetCell(Doc, Col, 0);
         Assert(TopCell);
 
-        enum cell_alignment Align = TopCell->Align;
-        s32 Width = Max(TopCell->Width ?: DEFAULT_CELL_WIDTH, MIN_CELL_WIDTH);
-        s32 Prcsn = TopCell->Prcsn;
+        struct fmt_header Fmt = TopCell->Fmt;
+        MergeHeader(&Fmt, &DefaultHeader);
+        Fmt.Width = Max(Fmt.Width, MIN_CELL_WIDTH);
 
         FOREACH_ROW(Doc, Row) {
             struct cell *Cell = GetCell(Doc, Col, Row);
-            Cell->Align = Align;
-            Cell->Width = Width;
-            Cell->Prcsn = Prcsn;
+            Cell->Fmt.SetMask &= ~SET_WIDTH; /* overwrite cell-local width */
+            MergeHeader(&Cell->Fmt, &Fmt);
         }
     }
 
@@ -2325,20 +2394,20 @@ PrintDocument(struct document *Doc)
 # define X(S,...) printf(S, T(UL_START), __VA_ARGS__, T(UL_END));
             switch (Cell->Type) {
             case CELL_STRING:
-                X("[%s%-*s%s]", Cell->Width, Cell->AsString);
+                X("[%s%-*s%s]", Cell->Fmt.Width, Cell->AsString);
                 break;
             case CELL_NUMBER:
-                X("(%s%'*.*f%s)", Cell->Width, Cell->Prcsn, Cell->AsNumber);
+                X("(%s%'*.*f%s)", Cell->Fmt.Width, Cell->Fmt.Prcsn, Cell->AsNumber);
                 break;
             case CELL_EXPR:
-                X("{%s%-*s%s}", Cell->Width, Cell->AsExpr);
+                X("{%s%-*s%s}", Cell->Fmt.Width, Cell->AsExpr);
                 break;
             case CELL_ERROR:
-                X("<%s%-*s%s>", Cell->Width, CellErrStr(Cell->AsError));
+                X("<%s%-*s%s>", Cell->Fmt.Width, CellErrStr(Cell->AsError));
                 break;
             case CELL_NULL:
                 printf("!%s", T(UL_START));
-                for (s32 It = 0; It < Cell->Width; ++It) putchar('.');
+                for (s32 It = 0; It < Cell->Fmt.Width; ++It) putchar('.');
                 printf("%s!", T(UL_END));
                 break;
             InvalidDefaultCase;
@@ -2352,19 +2421,19 @@ PrintDocument(struct document *Doc)
 #endif
             switch (Cell->Type) {
             case CELL_STRING:
-                printf("%-*s", Cell->Width, Cell->AsString);
+                printf("%-*s", Cell->Fmt.Width, Cell->AsString);
                 break;
             case CELL_NUMBER:
-                printf("%'*.*f", Cell->Width, Cell->Prcsn, Cell->AsNumber);
+                printf("%'*.*f", Cell->Fmt.Width, Cell->Fmt.Prcsn, Cell->AsNumber);
                 break;
             case CELL_EXPR:
-                printf("%-*s", Cell->Width, Cell->AsString);
+                printf("%-*s", Cell->Fmt.Width, Cell->AsString);
                 break;
             case CELL_ERROR:
-                printf("%-*s", Cell->Width, CellErrStr(Cell->AsError));
+                printf("%-*s", Cell->Fmt.Width, CellErrStr(Cell->AsError));
                 break;
             case CELL_NULL:
-                for (s32 It = 0; It < Cell->Width; ++It) putchar(' ');
+                for (s32 It = 0; It < Cell->Fmt.Width; ++It) putchar(' ');
                 break;
             InvalidDefaultCase;
             }
