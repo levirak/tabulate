@@ -882,6 +882,7 @@ enum expr_func {
     EF_ABS,
     EF_SIGN,
     EF_NUMBER,
+    EF_MASK_SUM,
 };
 
 struct expr_token {
@@ -901,6 +902,7 @@ struct expr_token {
         ET_FUNC,
         ET_CELL_REF,
         ET_NUMBER,
+        ET_STRING,
         ET_MACRO,
 
         ET_UNKNOWN,
@@ -979,6 +981,19 @@ NextExprToken(struct expr_lexer *State, struct expr_token *Out)
         case ':': ++State->Cur; Out->Type = ET_COLON; break;
         case ';': ++State->Cur; Out->Type = ET_LIST_SEP; break;
 
+        case '"':
+            ++State->Cur;
+            while (*State->Cur && *State->Cur != '"') {
+                if (Cur < End) *Cur++ = *State->Cur;
+                ++State->Cur;
+            }
+            *Cur = 0;
+            if (*State->Cur == '"') ++State->Cur;
+
+            Out->Type = ET_STRING;
+            Out->AsString = SaveStr(State->Buf);
+            break;
+
         case '{':
             ++State->Cur;
             while (*State->Cur && *State->Cur != ':' && *State->Cur != '}') {
@@ -1001,7 +1016,7 @@ NextExprToken(struct expr_lexer *State, struct expr_token *Out)
             Out->AsNumber = Str2f64(State->Cur, &State->Cur);
             break;
 
-        default: {
+        default:
             Assert(IsExprIdentifierChar(*State->Cur));
             do {
                 if (Cur < End) *Cur++ = *State->Cur;
@@ -1023,6 +1038,7 @@ NextExprToken(struct expr_lexer *State, struct expr_token *Out)
             MATCH (EF_ABS, X("abs"))
             MATCH (EF_SIGN, X("sign"))
             MATCH (EF_NUMBER, X("number"))
+            MATCH (EF_MASK_SUM, X("mask_sum"))
 #undef MATCH
 #undef X
             else {
@@ -1042,7 +1058,7 @@ NextExprToken(struct expr_lexer *State, struct expr_token *Out)
                     Out->Type = ET_UNKNOWN;
                 }
             }
-        } break;
+            break;
         }
     }
 
@@ -1154,21 +1170,12 @@ NodeFromToken(struct expr_token *Token)
     Assert(Token);
     struct expr_node *Node = ReserveData(sizeof *Node);
     switch (Token->Type) {
-    case ET_NUMBER:
-        *Node = NumberNode(Token->AsNumber);
-        break;
-    case ET_FUNC:
-        *Node = FuncNameNode(Token->AsFunc);
-        break;
-    case ET_MACRO:
-        *Node = MacroNode(Token->AsMacro);
-        break;
-    case ET_BEGIN_XENO_REF:
-        *Node = StringNode(Token->AsXeno);
-        break;
-    case ET_CELL_REF:
-        *Node = CellNode(Token->AsCell);
-        break;
+    case ET_NUMBER:         *Node = NumberNode(Token->AsNumber); break;
+    case ET_STRING:         *Node = StringNode(Token->AsString); break;
+    case ET_FUNC:           *Node = FuncNameNode(Token->AsFunc); break;
+    case ET_MACRO:          *Node = MacroNode(Token->AsMacro); break;
+    case ET_BEGIN_XENO_REF: *Node = StringNode(Token->AsXeno); break;
+    case ET_CELL_REF:       *Node = CellNode(Token->AsCell); break;
     InvalidDefaultCase;
     }
     return Node;
@@ -1422,6 +1429,9 @@ ParseTerm(struct expr_lexer *Lexer)
         }
         break;
     case ET_NUMBER:
+        Child = NodeFromToken(&Token);
+        break;
+    case ET_STRING:
         Child = NodeFromToken(&Token);
         break;
     case ET_MACRO:
@@ -1712,7 +1722,7 @@ SumRange(struct document *Doc, f64 *Out, struct cell_block *Range)
     for (s32 Col = FirstCol; Col <= LastCol; ++Col) {
         for (s32 Row = FirstRow; Row <= LastRow; ++Row) {
             EvaluateCell(Doc, Col, Row);
-            struct cell *Cell = GetCell(Doc, Col, Row);
+            struct cell *Cell = NotNull(GetCell(Doc, Col, Row));
             if (Cell->Type == CELL_NUMBER) {
                 Acc += Cell->AsNumber;
             }
@@ -1771,6 +1781,43 @@ CountRange(struct document *Doc, f64 *Out, struct cell_block *Range)
         for (s32 Row = FirstRow; Row <= LastRow; ++Row) {
             EvaluateCell(Doc, Col, Row);
             Acc += (GetCell(Doc, Col, Row)->Type == CELL_NUMBER);
+        }
+    }
+
+    *Out = Acc;
+    return Error;
+}
+
+static enum expr_error
+MaskSum(struct document *Doc, f64 *Out, s32 MaskCol, struct expr_node *Proto, s32 SelCol)
+{
+    Assert(Doc);
+    Assert(Out);
+    Assert(Proto);
+
+    enum expr_error Error = 0;
+
+    s32 First = Doc->FirstBodyRow;
+    s32 OnePastLast = Min(Doc->FirstFootRow, Doc->Rows);
+
+    Assert(First >= 0);
+    Assert(OnePastLast <= Doc->Rows);
+
+    f64 Acc = 0;
+    for (s32 Row = First; Row < OnePastLast; ++Row) {
+        EvaluateCell(Doc, MaskCol, Row);
+        struct cell *Mask = GetCell(Doc, MaskCol, Row);
+        bool Accept = 0
+                || (Mask->Type == CELL_NUMBER && Proto->Type == EN_NUMBER && Mask->AsNumber == Proto->AsNumber)
+                || (Mask->Type == CELL_STRING && Proto->Type == EN_STRING && StrEq(Mask->AsString, Proto->AsString))
+                ;
+
+        if (Accept) {
+            EvaluateCell(Doc, SelCol, Row);
+            struct cell * Trgt = GetCell(Doc, SelCol, Row);
+            if (Trgt->Type == CELL_NUMBER) {
+                Acc += Trgt->AsNumber;
+            }
         }
     }
 
@@ -1860,6 +1907,21 @@ EvaluateIntoNode(struct document *Doc, s32 Col, s32 Row, struct expr_node *Node)
     else {
         SetAsNodeFrom(Node, GetCell(Doc, Col, Row));
     }
+}
+
+static s32
+ArgListLen(struct expr_node *List)
+{
+    s32 Count = 0;
+    if (List) {
+        Assert(List->Type == EN_LIST);
+        ++Count;
+        for (List = List->AsBinary.Right; List; List = List->AsBinary.Right) {
+            Assert(List->Type == EN_LIST_CONT);
+            ++Count;
+        }
+    }
+    return Count;
 }
 
 static struct expr_node *
@@ -2151,6 +2213,39 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row)
             }
             break;
 
+        case EF_MASK_SUM:
+            if (!Right || Right->Type != EN_LIST || ArgListLen(Right) != 3) {
+                LogError("mask_sum/3 takes three arguments");
+            }
+            else {
+                struct expr_node *List = Right;
+                struct expr_node *Arg0, *Arg1, *Arg2;
+                Arg0 = List->AsBinary.Left; List = List->AsBinary.Right;
+                Arg1 = List->AsBinary.Left; List = List->AsBinary.Right;
+                Arg2 = List->AsBinary.Left; List = List->AsBinary.Right;
+                Assert(List == 0);
+                if (Arg0->Type != EN_NUMBER) {
+                    LogError("mask_sum/3 arg 0 should be a number");
+                }
+                if (Arg1->Type != EN_NUMBER && Arg1->Type != EN_STRING) {
+                    LogError("mask_sum/3 arg 1 should be a number or string");
+                }
+                else if (Arg2->Type != EN_NUMBER) {
+                    LogError("mask_sum/3 arg 2 should be a number");
+                }
+                else {
+                    enum expr_error Err;
+                    f64 Sum = 0;
+                    if ((Err = MaskSum(Doc, &Sum, Arg0->AsNumber, Arg1, Arg2->AsNumber))) {
+                        *Node = ErrorNode(Err);
+                    }
+                    else {
+                        *Node = NumberNode(Sum);
+                    }
+                }
+            }
+            break;
+
         InvalidDefaultCase;
         }
     } break;
@@ -2378,7 +2473,7 @@ PrintDocument(struct document *Doc)
 #endif
 
         FOREACH_COL(Doc, Col) {
-            struct cell *Cell = GetCell(Doc, Col, Row);
+            struct cell *Cell = NotNull(GetCell(Doc, Col, Row));
 #if USE_UNDERLINE
             bool Underline = 0
                     || UnderlineRow
@@ -2424,7 +2519,28 @@ PrintDocument(struct document *Doc)
                 printf("%-*s", Cell->Fmt.Width, Cell->AsString);
                 break;
             case CELL_NUMBER:
-                printf("%'*.*f", Cell->Fmt.Width, Cell->Fmt.Prcsn, Cell->AsNumber);
+                struct cell *TopCell = NotNull(GetCell(Doc, Col, 0));
+                Assert(Cell->Fmt.Width == TopCell->Fmt.Width);
+                if (Cell->Fmt.Prcsn < TopCell->Fmt.Prcsn) {
+                    Assert(Cell->Fmt.Width > TopCell->Fmt.Prcsn);
+                    /* TODO(lrak): this is a bit gross, but remember we have to
+                     * deal with aligning decimal points even if there is no
+                     * decimal point (e.g., aligning "2.5" and "1" s.t. the '2'
+                     * and '1' are in the same column.) */
+                    s32 Width = Cell->Fmt.Width - TopCell->Fmt.Prcsn;
+                    if (Cell->Fmt.Prcsn) {
+                        Width += Cell->Fmt.Prcsn;
+                    }
+                    else {
+                        --Width;
+                    }
+                    printf("%'*.*f%*s", Width, Cell->Fmt.Prcsn, Cell->AsNumber,
+                            Cell->Fmt.Width - Width, "");
+                }
+                else {
+                    printf("%'*.*f", Cell->Fmt.Width, Cell->Fmt.Prcsn,
+                            Cell->AsNumber);
+                }
                 break;
             case CELL_EXPR:
                 printf("%-*s", Cell->Fmt.Width, Cell->AsString);
@@ -2487,6 +2603,17 @@ main(s32 ArgCount, char **Args)
     /* NOTE: this call will get glibc to set all locals from the environment */
     setlocale(LC_ALL, "");
 
+    if (ArgCount < 2) {
+        char *Path = "/dev/stdin";
+        struct document *Doc = MakeDocument(AT_FDCWD, Path);
+        if (!Doc) {
+            LogWarn("Could not find document %s", Path);
+        }
+        else {
+            EvaluateDocument(Doc);
+            PrintDocument(Doc);
+        }
+    }
     for (s32 Idx = 1; Idx < ArgCount; ++Idx) {
         char *Path = Args[Idx];
 

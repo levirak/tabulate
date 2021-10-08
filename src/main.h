@@ -51,7 +51,7 @@ static_assert(sizeof (umm) == sizeof (smm));
 static_assert(sizeof (smm) == sizeof (dptr));
 
 #define fallthrough __attribute__((fallthrough))
-#define inline inline __attribute((gnu_inline))
+#define inline inline __attribute__((gnu_inline))
 #define noreturn _Noreturn
 #define atomic _Atomic
 
