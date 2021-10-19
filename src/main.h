@@ -1,6 +1,22 @@
 #ifndef __main_h__
 #define __main_h__
 
+/* params */
+#define USE_UNDERLINE 1
+#define DEFAULT_CELL_PRECISION 2
+#define DEFAULT_CELL_WIDTH 10
+#define MIN_CELL_WIDTH 4
+#define INIT_ROW_COUNT 16
+#define INIT_COL_COUNT 8
+#define SEPERATOR "  "
+#define DEDUPLICATE_STRINGS 0 /* WARN: will likely take more mem & cpu  */
+#define INIT_DOC_CACHE_SIZE 32
+
+/* derived params */
+#define BRACKETED (BRACKET_CELLS || OVERDRAW_COL || OVERDRAW_ROW)
+
+
+/* generic things */
 #define Unreachable __builtin_unreachable()
 #define NotImplemented __builtin_trap()
 
