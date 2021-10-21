@@ -2,7 +2,6 @@
 #define _mem_h_
 #include "main.h"
 
-
 struct cell_ref {
     s32 Col, Row;
 };
@@ -92,18 +91,21 @@ struct document {
     s32 FirstFootRow;
 
     /* TODO(lrak): better macro storage */
-#define MACRO_NAME_LEN 63
-#define MACRO_BODY_LEN 191
 #define MACRO_MAX_COUNT 16
     s32 NumMacros;
     struct macro_def {
-        char Name[MACRO_NAME_LEN+1];
-        char Body[MACRO_BODY_LEN+1];
+        char *Name;
+        char *Body;
     } Macros[MACRO_MAX_COUNT];
 };
 
 struct document *FindExistingDoc(dev_t Device, ino_t Inode);
 struct document *AllocAndLogDoc();
+
+s32 CellExists(struct document *Doc, s32 Col, s32 Row);
+struct cell *TryGetCell(struct document *Doc, s32 Col, s32 Row);
+#define GetCell(...) (NotNull(TryGetCell(__VA_ARGS__)))
+struct cell *ReserveCell(struct document *Doc, s32 Col, s32 Row);
 
 
 #define X_CATEGORIES\
@@ -118,7 +120,7 @@ enum page_categories {
 };
 
 void *ReserveData(u32 Sz);
-char *SaveStr(char *Str);
+char *SaveStr(char *Str, bool Strip);
 
 void PrintAllMemInfo(void);
 void WipeAllMem(void);

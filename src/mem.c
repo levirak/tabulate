@@ -6,8 +6,8 @@
 #include <string.h>
 #include <stdlib.h>
 
-/* debug */
-#define ANNOUNCE_DOCUMENT_CACHE_RESIZE 1
+static void *Alloc(umm Sz) { return NotNull(malloc(Sz)); }
+static void *Realloc(void *Ptr, umm Sz) { return NotNull(realloc(Ptr, Sz)); }
 
 static char *
 CategoryString(enum page_categories Category)
@@ -106,7 +106,7 @@ FindOrReserve(char *Str)
         }
         umm AllocSize = NewSize * sizeof *StringTable.Data;
         struct hash_table NewTable = {
-            .Data = malloc(AllocSize),
+            .Data = Alloc(AllocSize),
             .Size = CheckGt(NewSize, 0),
             .Used = 0,
         };
@@ -143,7 +143,7 @@ Fit(ptr Ptr, enum page_categories Category)
 static struct page *
 NewPage(enum page_categories Type)
 {
-    struct page *Page = NotNull(malloc(PAGE_SIZE));
+    struct page *Page = Alloc(PAGE_SIZE);
     Page->Next = 0;
     Page->Size = PAGE_SIZE;
     Page->Used = Fit(sizeof *Page, Type);
@@ -162,24 +162,36 @@ static void *
 Reserve(u32 Size, enum page_categories Type)
 {
     Assert(Type < TOTAL_CATEGORIES);
-    struct page **FirstPage = Category + Type;
-
+    struct page **pFirstPage = Category + Type;
     Size = Fit(Size, Type);
-    struct page *Page = *FirstPage;
-    while (Page && Size > Page->Size - Page->Used) {
-        Page = Page->Next;
-    }
 
-    if (!Page) {
+    struct page *Page = *pFirstPage;
+    if (!Page || Size > Page->Size - Page->Used) {
         Page = NewPage(Type);
-        Page->Next = *FirstPage;
-        *FirstPage = Page;
+        Page->Next = *pFirstPage;
+        *pFirstPage = Page;
         Assert(Size <= Page->Size);
     }
 
     char *New = (char *)Page + Page->Used;
     Page->Used += Size;
     Assert(Page->Used <= Page->Size);
+
+#if SORT_PAGES
+    if (Page->Next && Page->Used > Page->Next->Used) {
+        Assert(Page == *pFirstPage);
+        *pFirstPage = (*pFirstPage)->Next;
+
+        struct page **pThat = pFirstPage;
+        while (*pThat && Page->Used > (*pThat)->Used) {
+            pThat = &(*pThat)->Next;
+        }
+
+        Page->Next = *pThat;
+        *pThat = Page;
+    }
+#endif
+
     return NotNull(New);
 }
 
@@ -191,7 +203,7 @@ ReserveData(u32 Sz)
 }
 
 char *
-SaveStr(char *Str)
+SaveStr(char *Str, bool Strip)
 {
 #if DEDUPLICATE_STRINGS
     struct hash_pair *Entry = NotNull(FindOrReserve(Str));
@@ -201,6 +213,9 @@ SaveStr(char *Str)
     }
     else {
         umm Sz = strlen(Str) + 1;
+        if (Strip) {
+            while (Sz > 0 && Str[Sz-1] == '\n') --Sz;
+        }
         New = Reserve(Sz, STRING_PAGE);
         strncpy(New, Str, Sz);
         Entry->Str = New;
@@ -208,6 +223,9 @@ SaveStr(char *Str)
     return New;
 #else
     u32 Sz = strlen(Str) + 1;
+    if (Strip) {
+        while (Sz > 0 && Str[Sz-1] == '\n') --Sz;
+    }
     char *New = Reserve(Sz, STRING_PAGE);
     strncpy(New, Str, Sz);
     return New;
@@ -223,18 +241,19 @@ PrintAllMemInfo(void)
     umm TotalUsed = 0;
 
     printf( "\n"
-            "category          this                used      size      next\n"
-            "----------------  ------------------  --------  --------  ------------------\n");
+            "category          idx   this                used        size        next                per cent\n"
+            "----------------  ----  ------------------  ----------  ----------  ------------------  --------\n");
     for (s32 Idx = 0; Idx < TOTAL_CATEGORIES; ++Idx) {
+        s32 Num = 0;
         struct page *This = Category[Idx];
         if (!This) {
-            printf("%16s  %18p\n", CategoryString(Idx), (void *)0);
+            printf("%16s  %4d  %18p\n", CategoryString(Idx), Num++, (void *)0);
         }
         else do {
             snprintf(Buf, sizeof Buf, "0x%x", This->Used);
-            printf("%16s  %18p  %8s  ", CategoryString(Idx), This, Buf);
+            printf("%16s  %4d  %18p  %10s  ", CategoryString(Idx), Num++, This, Buf);
             snprintf(Buf, sizeof Buf, "0x%x", This->Size);
-            printf("%8s  %18p\n", Buf, This->Next);
+            printf("%10s  %18p  %7.2f%%\n", Buf, This->Next, 100.0*This->Used/This->Size);
 
             TotalSize += This->Size;
             TotalUsed += This->Used;
@@ -242,46 +261,57 @@ PrintAllMemInfo(void)
         while ((This = This->Next));
     }
 
-#if DEDUPLICATE_STRINGS
-    snprintf(Buf, sizeof Buf, "0x%lx", StringTable.Used * sizeof *StringTable.Data);
-    printf("  (string table)                      %8s  ", Buf);
-    snprintf(Buf, sizeof Buf, "0x%lx", StringTable.Size * sizeof *StringTable.Data);
-    printf("%8s                      (%lu unique strings)\n", Buf, StringTable.Used);
-
-    TotalSize += StringTable.Size * sizeof *StringTable.Data;
-    TotalUsed += StringTable.Used * sizeof *StringTable.Data;
-#endif
-
     snprintf(Buf, sizeof Buf, "0x%lx", DocCache.Used * sizeof *DocCache.Data);
-    printf("(document cache)                      %8s  ", Buf);
+    printf("(document cache)     0                      %10s  ", Buf);
     snprintf(Buf, sizeof Buf, "0x%lx", DocCache.Size * sizeof *DocCache.Data);
-    printf("%8s                      (%lu documents)\n", Buf, DocCache.Used);
+    printf("%10s  ", Buf);
+    snprintf(Buf, sizeof Buf, "(%lu documents)", DocCache.Used);
+    printf("%18s  %7.2f%%\n", Buf, 100.0*DocCache.Used/DocCache.Size);
+
+    TotalSize += DocCache.Size * sizeof *DocCache.Data;
+    TotalUsed += DocCache.Used * sizeof *DocCache.Data;
+
     if (!DocCache.Data) {
         printf("      (document)  %18p\n", (void *)0);
     }
     else for (umm Idx = 0; Idx < DocCache.Used; ++Idx) {
         struct document *This = DocCache.Data[Idx];
-        printf("      (document)  %18p            ", This);
         struct doc_cells *Table = &This->Table;
-        umm TableSize = Table->Rows * Table->Cols * sizeof *Table->Cells;
-        snprintf(Buf, sizeof Buf, "0x%lx", sizeof *This + TableSize);
-        printf("%8s\n", Buf);
 
-        TotalSize += sizeof *This + TableSize;
-        TotalUsed += sizeof *This + TableSize;
+        umm TableSize = Table->Rows * Table->Cols * sizeof *Table->Cells;
+        umm TableUsed = This->Rows * This->Cols * sizeof *Table->Cells;
+        umm DocumentSize = sizeof *This + TableSize;
+        umm DocumentUsed = sizeof *This + TableUsed;
+
+        snprintf(Buf, sizeof Buf, "0x%lx", DocumentUsed);
+        printf("      (document)  %4ld  %18p  %10s  ", Idx, This, Buf);
+        snprintf(Buf, sizeof Buf, "0x%lx", DocumentSize);
+        printf("%10s                      %7.2f%%\n", Buf, 100.0*DocumentUsed/DocumentSize);
+
+        TotalSize += DocumentSize;
+        TotalUsed += DocumentUsed;
     }
 
+#if DEDUPLICATE_STRINGS
+    snprintf(Buf, sizeof Buf, "(%lu strings)", StringTable.Used);
+    printf("  (string table)     0  %18s  ", Buf);
+    snprintf(Buf, sizeof Buf, "0x%lx", StringTable.Used * sizeof *StringTable.Data);
+    printf("%10s  ", Buf);
+    snprintf(Buf, sizeof Buf, "0x%lx", StringTable.Size * sizeof *StringTable.Data);
+    printf("%10s\n", Buf);
 
-    TotalSize += DocCache.Size * sizeof *DocCache.Data;
-    TotalUsed += DocCache.Used * sizeof *DocCache.Data;
+    TotalSize += StringTable.Size * sizeof *StringTable.Data;
+    TotalUsed += StringTable.Used * sizeof *StringTable.Data;
+#endif
 
-    printf("----------------  ------------------  --------  --------  ------------------\n");
+    printf("----------------  ----  ------------------  ----------  ----------  ------------------  --------\n");
     snprintf(Buf, sizeof Buf, "0x%lx", TotalUsed);
-    printf("                                      %8s", Buf);
+    printf("                                            %10s  ", Buf);
     snprintf(Buf, sizeof Buf, "0x%lx", TotalSize);
-    printf("  %8s\n", Buf);
-    printf("                                      %5lu Kb  %5lu KB\n",
-            TotalUsed / 1024, TotalSize / 1024);
+    printf("%10s\n", Buf);
+    printf("                                            %7lu KB  %7lu KB                      %7.2f%%\n",
+            TotalUsed / 1024, TotalSize / 1024, 100.0*TotalUsed/TotalSize);
+    /*printf("sizeof (struct document) == 0x%lx\n", sizeof (struct document));*/
 }
 
 void
@@ -382,9 +412,86 @@ AllocAndLogDoc()
 #if ANNOUNCE_DOCUMENT_CACHE_RESIZE
         LogInfo("Resizing document cache to %lu", NewSize);
 #endif
-        DocCache.Data = realloc(DocCache.Data, NewSize*sizeof *DocCache.Data);
+        DocCache.Data = Realloc(DocCache.Data, NewSize*sizeof *DocCache.Data);
         DocCache.Size = NewSize;
         Assert(DocCache.Data);
     }
-    return DocCache.Data[Idx] = NotNull(malloc(sizeof (struct document)));
+    return DocCache.Data[Idx] = Alloc(sizeof (struct document));
+}
+
+static s32
+GetCellIdx(struct doc_cells *Table, s32 Col, s32 Row)
+{
+    Assert(0 <= Col); Assert(Col < Table->Cols);
+    Assert(0 <= Row); Assert(Row < Table->Rows);
+    return Row + Col*Table->Rows;
+}
+
+s32
+CellExists(struct document *Doc, s32 Col, s32 Row)
+{
+    return 0 <= Col && Col < Doc->Table.Cols
+        && 0 <= Row && Row < Doc->Table.Rows;
+}
+
+struct cell *
+TryGetCell(struct document *Doc, s32 Col, s32 Row)
+{
+    Assert(Doc);
+    struct cell *Cell = 0;
+
+    if (CellExists(Doc, Col, Row)) {
+        Cell = Doc->Table.Cells + GetCellIdx(&Doc->Table, Col, Row);
+    }
+
+    return Cell;
+}
+
+struct cell *
+ReserveCell(struct document *Doc, s32 Col, s32 Row)
+{
+    Assert(Doc);
+    Assert(Col >= 0);
+    Assert(Row >= 0);
+
+    if (Col >= Doc->Table.Cols || Row >= Doc->Table.Rows) {
+        /* resize */
+        struct doc_cells New = {
+#if INIT_COL_COUNT == 0
+            .Cols = Max(Doc->Table.Cols, Col+2),
+#else
+            .Cols = Max3(Doc->Table.Cols, NextPow2(Col+1), INIT_COL_COUNT),
+#endif
+#if INIT_ROW_COUNT == 0
+            .Rows = Max(Doc->Table.Rows, Row+2),
+#else
+            .Rows = Max3(Doc->Table.Rows, NextPow2(Row+1), INIT_ROW_COUNT),
+#endif
+        };
+
+        umm NewSize = sizeof *New.Cells * New.Cols * New.Rows;
+        New.Cells = Alloc(NewSize);
+        memset(New.Cells, 0, NewSize);
+
+        if (Doc->Table.Cells) {
+            for (s32 ColIdx = 0; ColIdx < Doc->Cols; ++ColIdx) {
+                for (s32 RowIdx = 0; RowIdx < Doc->Rows; ++RowIdx) {
+                    s32 NewIdx = GetCellIdx(&New, ColIdx, RowIdx);
+                    s32 OldIdx = GetCellIdx(&Doc->Table, ColIdx, RowIdx);
+                    New.Cells[NewIdx] = Doc->Table.Cells[OldIdx];
+                }
+            }
+            free(Doc->Table.Cells);
+        }
+
+        Doc->Table = New;
+    }
+
+    Doc->Cols = Max(Doc->Cols, Col+1);
+    Doc->Rows = Max(Doc->Rows, Row+1);
+
+    Assert(Doc->Cols <= Doc->Table.Cols);
+    Assert(Doc->Rows <= Doc->Table.Rows);
+    Assert(Doc->Table.Cells);
+    return GetCell(Doc, Col, Row);
 }

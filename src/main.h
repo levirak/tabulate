@@ -1,20 +1,41 @@
 #ifndef __main_h__
 #define __main_h__
 
-/* params */
+#ifdef NDEBUG
+#define DEBUG 0
+#else
+#define DEBUG 1
+#endif
+
+/* debug */
+#define PREPRINT_ROWS                  (0 && DEBUG)
+#define PREPRINT_PARSING               (0 && DEBUG)
+#define BRACKET_CELLS                  (0 && DEBUG)
+#define OVERDRAW_ROW                   (0 && DEBUG)
+#define OVERDRAW_COL                   (0 && DEBUG)
+#define ANNOUNCE_NEW_DOCUMENT          (0 && DEBUG)
+#define PRINT_MEM_INFO                 (1 && DEBUG)
+#define DUMP_MEM_INFO                  (0 && DEBUG)
+#define ANNOUNCE_DOCUMENT_CACHE_RESIZE (0 && DEBUG)
+#define TIME_MAIN                      (1 && DEBUG)
+
+#define USE_FULL_PARSE_TREE 0
+
+/* feature switches */
 #define USE_UNDERLINE 1
+#define DEDUPLICATE_STRINGS 0
+#define SORT_PAGES 1
+
+/* constants */
 #define DEFAULT_CELL_PRECISION 2
 #define DEFAULT_CELL_WIDTH 10
 #define MIN_CELL_WIDTH 4
-#define INIT_ROW_COUNT 16
-#define INIT_COL_COUNT 8
+#define INIT_ROW_COUNT 16 /* 0 for linear growth */
+#define INIT_COL_COUNT 8 /* 0 for linear growth */
 #define SEPERATOR "  "
-#define DEDUPLICATE_STRINGS 0 /* WARN: will likely take more mem & cpu  */
 #define INIT_DOC_CACHE_SIZE 32
 
-/* derived params */
 #define BRACKETED (BRACKET_CELLS || OVERDRAW_COL || OVERDRAW_ROW)
-
 
 /* generic things */
 #define Unreachable __builtin_unreachable()

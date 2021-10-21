@@ -16,19 +16,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <math.h>
-
-/* debug */
-#define PREPRINT_ROWS 0
-#define PREPRINT_PARSING 0
-#define BRACKET_CELLS 0
-#define OVERDRAW_ROW 0
-#define OVERDRAW_COL 0
-#define ANNOUNCE_NEW_DOCUMENT 0
-#define PRINT_MEM_INFO 0
-#define DUMP_MEM_INFO 0
-
-#define USE_FULL_PARSE_TREE 0
-
+#include <time.h>
 
 /* constants */
 #define UL_START "\e[4m"
@@ -327,9 +315,6 @@ AbsoluteDim(s32 Dim, s32 This)
     return CheckGe(Dim, 0);
 }
 
-static struct cell *GetCell(struct document *Doc, s32 Col, s32 Row);
-static struct cell *ReserveCell(struct document *Doc, s32 Col, s32 Row);
-
 static struct document *
 MakeDocument(fd Dir, char *Path)
 {
@@ -415,14 +400,14 @@ MakeDocument(fd Dir, char *Path)
                             SetAsNumber(Cell, Value);
                         }
                         else {
-                            SetAsString(Cell, SaveStr(CellBuf));
+                            SetAsString(Cell, SaveStr(CellBuf, 0));
                         }
                         break;
                     case CELL_EXPR:
-                        SetAsExpr(Cell, SaveStr(CellBuf));
+                        SetAsExpr(Cell, SaveStr(CellBuf, 0));
                         break;
                     case CELL_STRING:
-                        SetAsString(Cell, SaveStr(CellBuf));
+                        SetAsString(Cell, SaveStr(CellBuf, 0));
                         break;
                         InvalidDefaultCase;
                     }
@@ -440,7 +425,7 @@ MakeDocument(fd Dir, char *Path)
 
                     if (FmtIdx >= 0 && FmtIdx != RowIdx) {
                         struct cell *FmtCell;
-                        FmtCell = NotNull(GetCell(Doc, ColIdx, FmtIdx));
+                        FmtCell = GetCell(Doc, ColIdx, FmtIdx);
                         MergeHeader(&Cell->Fmt, &FmtCell->Fmt);
                     }
 
@@ -569,23 +554,13 @@ MakeDocument(fd Dir, char *Path)
                         }
                         else {
                             s32 Idx = Doc->NumMacros++;
-                            strncpy(Doc->Macros[Idx].Name, CmdBuf, MACRO_NAME_LEN);
 
                             while (isspace(*Lexer.Cur)) ++Lexer.Cur;
-
-                            char *Cur = Doc->Macros[Idx].Body;
-                            char *End = Doc->Macros[Idx].Body + MACRO_BODY_LEN;
-
-                            *Cur = 0;
-                            while (*Lexer.Cur) {
-                                if (Cur < End) *Cur++ = *Lexer.Cur;
-                                ++Lexer.Cur;
-                            }
-                            *Cur = 0;
+                            Doc->Macros[Idx] = (struct macro_def){
+                                .Name = SaveStr(CmdBuf, 0),
+                                .Body = SaveStr(Lexer.Cur, 1),
+                            };
 #if PREPRINT_ROWS
-                            while (Cur > Doc->Macros[Idx].Body && Cur[-1] == '\n') {
-                                *--Cur = 0;
-                            }
                             printf("[%s]", Doc->Macros[Idx].Body);
 #endif
                         }
@@ -623,14 +598,6 @@ MakeDocument(fd Dir, char *Path)
     return Doc;
 }
 
-static s32
-GetCellIdx(struct doc_cells *Table, s32 Col, s32 Row)
-{
-    Assert(0 <= Col); Assert(Col < Table->Cols);
-    Assert(0 <= Row); Assert(Row < Table->Rows);
-    return Row + Col*Table->Rows;
-}
-
 /* NOTE: may return an invalid column index */
 static s32
 CanonicalCol(struct document *Doc, s32 Col, s32 ThisCol)
@@ -658,66 +625,6 @@ CanonicalRow(struct document *Doc, s32 Row, s32 ThisRow)
         Row = AbsoluteDim(Row, ThisRow);
     }
     return Row;
-}
-
-static s32
-CellExists(struct document *Doc, s32 Col, s32 Row)
-{
-    return 0 <= Col && Col < Doc->Table.Cols
-        && 0 <= Row && Row < Doc->Table.Rows;
-}
-
-static struct cell *
-GetCell(struct document *Doc, s32 Col, s32 Row)
-{
-    Assert(Doc);
-    struct cell *Cell = 0;
-
-    if (CellExists(Doc, Col, Row)) {
-        Cell = Doc->Table.Cells + GetCellIdx(&Doc->Table, Col, Row);
-    }
-    return Cell;
-}
-
-static struct cell *
-ReserveCell(struct document *Doc, s32 Col, s32 Row)
-{
-    Assert(Doc);
-    Assert(Col >= 0);
-    Assert(Row >= 0);
-
-    if (Col >= Doc->Table.Cols || Row >= Doc->Table.Rows) {
-        /* resize */
-        struct doc_cells New = {
-            .Cols = Max3(Doc->Table.Cols, NextPow2(Col+1), INIT_COL_COUNT),
-            .Rows = Max3(Doc->Table.Rows, NextPow2(Row+1), INIT_ROW_COUNT),
-        };
-
-        umm NewSize = sizeof *New.Cells * New.Cols * New.Rows;
-        New.Cells = NotNull(malloc(NewSize));
-        memset(New.Cells, 0, NewSize);
-
-        if (Doc->Table.Cells) {
-            for (s32 ColIdx = 0; ColIdx < Doc->Cols; ++ColIdx) {
-                for (s32 RowIdx = 0; RowIdx < Doc->Rows; ++RowIdx) {
-                    s32 NewIdx = GetCellIdx(&New, ColIdx, RowIdx);
-                    s32 OldIdx = GetCellIdx(&Doc->Table, ColIdx, RowIdx);
-                    New.Cells[NewIdx] = Doc->Table.Cells[OldIdx];
-                }
-            }
-            free(Doc->Table.Cells);
-        }
-
-        Doc->Table = New;
-    }
-
-    Doc->Cols = Max(Doc->Cols, Col+1);
-    Doc->Rows = Max(Doc->Rows, Row+1);
-
-    Assert(Doc->Cols <= Doc->Table.Cols);
-    Assert(Doc->Rows <= Doc->Table.Rows);
-    Assert(Doc->Table.Cells);
-    return NotNull(GetCell(Doc, Col, Row));
 }
 
 enum expr_func {
@@ -838,7 +745,7 @@ NextExprToken(struct expr_lexer *State, struct expr_token *Out)
             if (*State->Cur == '"') ++State->Cur;
 
             Out->Type = ET_STRING;
-            Out->AsString = SaveStr(State->Buf);
+            Out->AsString = SaveStr(State->Buf, 0);
             break;
 
         case '{':
@@ -851,7 +758,7 @@ NextExprToken(struct expr_lexer *State, struct expr_token *Out)
             if (*State->Cur == ':') ++State->Cur;
 
             Out->Type = ET_BEGIN_XENO_REF;
-            Out->AsXeno = SaveStr(State->Buf);
+            Out->AsXeno = SaveStr(State->Buf, 0);
             break;
         case '}':
             ++State->Cur;
@@ -874,7 +781,7 @@ NextExprToken(struct expr_lexer *State, struct expr_token *Out)
 
             if (State->Buf[0] == '!') {
                 Out->Type = ET_MACRO;
-                Out->AsMacro = SaveStr(State->Buf + 1);
+                Out->AsMacro = SaveStr(State->Buf + 1, 0);
             }
 #define X(S) StrEq(State->Buf, S)
 #define MATCH(V,T) else if (T) { Out->Type = ET_FUNC; Out->AsFunc = V; }
@@ -1569,7 +1476,7 @@ SumRange(struct document *Doc, f64 *Out, struct cell_block *Range)
     for (s32 Col = FirstCol; Col <= LastCol; ++Col) {
         for (s32 Row = FirstRow; Row <= LastRow; ++Row) {
             EvaluateCell(Doc, Col, Row);
-            struct cell *Cell = NotNull(GetCell(Doc, Col, Row));
+            struct cell *Cell = GetCell(Doc, Col, Row);
             if (Cell->Type == CELL_NUMBER) {
                 Acc += Cell->AsNumber;
             }
@@ -2320,7 +2227,7 @@ PrintDocument(struct document *Doc)
 #endif
 
         FOREACH_COL(Doc, Col) {
-            struct cell *Cell = NotNull(GetCell(Doc, Col, Row));
+            struct cell *Cell = GetCell(Doc, Col, Row);
 #if USE_UNDERLINE
             bool Underline = 0
                     || UnderlineRow
@@ -2366,7 +2273,7 @@ PrintDocument(struct document *Doc)
                 printf("%-*s", Cell->Fmt.Width, Cell->AsString);
                 break;
             case CELL_NUMBER:
-                struct cell *TopCell = NotNull(GetCell(Doc, Col, 0));
+                struct cell *TopCell = GetCell(Doc, Col, 0);
                 Assert(Cell->Fmt.Width == TopCell->Fmt.Width);
                 if (Cell->Fmt.Prcsn < TopCell->Fmt.Prcsn) {
                     Assert(Cell->Fmt.Width > TopCell->Fmt.Prcsn);
@@ -2450,6 +2357,10 @@ main(s32 ArgCount, char **Args)
     /* NOTE: this call will get glibc to set all locals from the environment */
     setlocale(LC_ALL, "");
 
+#if TIME_MAIN
+    clock_t Start = clock();
+#endif
+
     if (ArgCount < 2) {
         char *Path = "/dev/stdin";
         struct document *Doc = MakeDocument(AT_FDCWD, Path);
@@ -2481,6 +2392,10 @@ main(s32 ArgCount, char **Args)
         }
     }
 
+#if TIME_MAIN
+    clock_t End = clock();
+#endif
+
 #if PRINT_MEM_INFO
     PrintAllMemInfo();
 #endif
@@ -2488,6 +2403,10 @@ main(s32 ArgCount, char **Args)
     DumpMemInfo(STRING_PAGE, "mem_dump_strings");
 #endif
     ReleaseAllMem();
+
+#if TIME_MAIN
+    printf("\nTime taken: %.3f ms\n", 1000.0 * (End - Start) / CLOCKS_PER_SEC);
+#endif
 
     return 0;
 }
