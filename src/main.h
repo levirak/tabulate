@@ -14,10 +14,10 @@
 #define OVERDRAW_ROW                   (0 && DEBUG)
 #define OVERDRAW_COL                   (0 && DEBUG)
 #define ANNOUNCE_NEW_DOCUMENT          (0 && DEBUG)
-#define PRINT_MEM_INFO                 (1 && DEBUG)
+#define PRINT_MEM_INFO                 (0 && DEBUG)
 #define DUMP_MEM_INFO                  (0 && DEBUG)
 #define ANNOUNCE_DOCUMENT_CACHE_RESIZE (0 && DEBUG)
-#define TIME_MAIN                      (1 && DEBUG)
+#define TIME_MAIN                      (0 && DEBUG)
 
 #define USE_FULL_PARSE_TREE 0
 

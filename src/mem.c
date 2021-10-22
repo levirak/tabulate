@@ -203,7 +203,7 @@ ReserveData(u32 Sz)
 }
 
 char *
-SaveStr(char *Str, bool Strip)
+SaveStr(char *Str)
 {
 #if DEDUPLICATE_STRINGS
     struct hash_pair *Entry = NotNull(FindOrReserve(Str));
@@ -213,9 +213,6 @@ SaveStr(char *Str, bool Strip)
     }
     else {
         umm Sz = strlen(Str) + 1;
-        if (Strip) {
-            while (Sz > 0 && Str[Sz-1] == '\n') --Sz;
-        }
         New = Reserve(Sz, STRING_PAGE);
         strncpy(New, Str, Sz);
         Entry->Str = New;
@@ -223,9 +220,6 @@ SaveStr(char *Str, bool Strip)
     return New;
 #else
     u32 Sz = strlen(Str) + 1;
-    if (Strip) {
-        while (Sz > 0 && Str[Sz-1] == '\n') --Sz;
-    }
     char *New = Reserve(Sz, STRING_PAGE);
     strncpy(New, Str, Sz);
     return New;

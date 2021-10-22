@@ -95,7 +95,7 @@ struct document {
     s32 NumMacros;
     struct macro_def {
         char *Name;
-        char *Body;
+        struct expr_node *Body;
     } Macros[MACRO_MAX_COUNT];
 };
 
@@ -120,7 +120,7 @@ enum page_categories {
 };
 
 void *ReserveData(u32 Sz);
-char *SaveStr(char *Str, bool Strip);
+char *SaveStr(char *Str);
 
 void PrintAllMemInfo(void);
 void WipeAllMem(void);
