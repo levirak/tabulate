@@ -336,7 +336,6 @@ ParseCellRef(char **pCur, s32 *pCol, s32 *pRow)
             while (isdigit(*++Cur));
         }
         else if (*Cur == '$') {
-            ;
             for (++Cur; isdigit(*Cur); ++Cur) {
                 Row = 10*Row + (*Cur - '0');
             }
