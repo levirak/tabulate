@@ -2293,6 +2293,7 @@ PrintDocument(struct document *Doc)
                 printf("%-*s", Cell->Fmt.Width, Cell->AsString);
                 break;
             case CELL_NUMBER:
+            {
                 struct cell *TopCell = GetCell(Doc, Col, 0);
                 Assert(Cell->Fmt.Width == TopCell->Fmt.Width);
                 if (Cell->Fmt.Prcsn < TopCell->Fmt.Prcsn) {
@@ -2316,6 +2317,7 @@ PrintDocument(struct document *Doc)
                             Cell->AsNumber);
                 }
                 break;
+            }
             case CELL_EXPR:
                 printf("%-*s", Cell->Fmt.Width, Cell->AsString);
                 break;
