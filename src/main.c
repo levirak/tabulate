@@ -37,6 +37,8 @@ enum expr_func {
     EF_COUNT,
     EF_ABS,
     EF_SIGN,
+    EF_FLOOR,
+    EF_CEIL,
     EF_NUMBER,
     EF_MASK_SUM,
 };
@@ -509,6 +511,8 @@ NextExprToken(struct expr_lexer *State, struct expr_token *Out)
             MATCH (EF_SIGN, X("sign"))
             MATCH (EF_NUMBER, X("number"))
             MATCH (EF_MASK_SUM, X("mask_sum"))
+            MATCH (EF_FLOOR, X("floor"))
+            MATCH (EF_CEIL, X("ceil"))
 #undef MATCH
 #undef X
             else {
@@ -1948,6 +1952,36 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row, struc
                 Assert(Arg.Type == EN_NUMBER);
                 f64 Number = Arg.AsNumber;
                 *Out = NumberNode((Number > 0)? 1: (Number < 0)? -1: 0);
+            }
+            break;
+
+        case EF_FLOOR:
+            if (!Arg.Type) {
+                LogError("floor/1 takes one argument");
+                *Out = ErrorNode(ERROR_ARGC);
+            }
+            else if (Arg.Type != EN_NUMBER) {
+                LogError("floor/1 takes a number (got %d)", Arg.Type);
+                *Out = ErrorNode(ERROR_TYPE);
+            }
+            else {
+                Assert(Arg.Type == EN_NUMBER);
+                *Out = NumberNode(floor(Arg.AsNumber));
+            }
+            break;
+
+        case EF_CEIL:
+            if (!Arg.Type) {
+                LogError("ceil/1 takes one argument");
+                *Out = ErrorNode(ERROR_ARGC);
+            }
+            else if (Arg.Type != EN_NUMBER) {
+                LogError("ceil/1 takes a number (got %d)", Arg.Type);
+                *Out = ErrorNode(ERROR_TYPE);
+            }
+            else {
+                Assert(Arg.Type == EN_NUMBER);
+                *Out = NumberNode(ceil(Arg.AsNumber));
             }
             break;
 
