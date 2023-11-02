@@ -41,6 +41,9 @@ enum expr_func {
     EF_CEIL,
     EF_NUMBER,
     EF_MASK_SUM,
+    EF_COL,
+    EF_ROW,
+    EF_CELL,
 };
 
 struct expr_token {
@@ -489,7 +492,10 @@ NextExprToken(struct expr_lexer *State, struct expr_token *Out)
             break;
 
         default:
-            Assert(IsExprIdentifierChar(*State->Cur));
+            if (!IsExprIdentifierChar(*State->Cur)) {
+                LogError("Expected identifier character, got '%c'", *State->Cur);
+                Assert(IsExprIdentifierChar(*State->Cur));
+            }
             do {
                 if (Cur < End) *Cur++ = *State->Cur;
                 ++State->Cur;
@@ -509,10 +515,13 @@ NextExprToken(struct expr_lexer *State, struct expr_token *Out)
             MATCH (EF_BODY_ROW, X("br") || X("bodyrow"))
             MATCH (EF_ABS, X("abs"))
             MATCH (EF_SIGN, X("sign"))
-            MATCH (EF_NUMBER, X("number"))
-            MATCH (EF_MASK_SUM, X("mask_sum"))
             MATCH (EF_FLOOR, X("floor"))
             MATCH (EF_CEIL, X("ceil"))
+            MATCH (EF_NUMBER, X("number"))
+            MATCH (EF_MASK_SUM, X("mask_sum"))
+            MATCH (EF_COL, X("col"))
+            MATCH (EF_ROW, X("row"))
+            MATCH (EF_CELL, X("cell"))
 #undef MATCH
 #undef X
             else {
@@ -556,7 +565,7 @@ SumCont  := [+-] Prod SumCont?
 Prod     := PreTerm ProdCont?
 ProdCont := [*/] PreTerm ProdCont?
 List     := Sum ListCont?
-ListCont := ',' Sum ListCont?
+ListCont := ';' Sum ListCont?
 PreTerm  := Term
 PreTerm  := '-' Term
 Term     := Func
@@ -621,8 +630,8 @@ struct expr_node {
             enum expr_operator Op;
         } AsUnary;
         struct {
+            struct cell_ref Cell;
             char *Reference;
-            struct expr_node *Cell;
         } AsXeno;
         struct {
             struct expr_node *This;
@@ -632,13 +641,14 @@ struct expr_node {
     };
 };
 
-#define ErrorNode(V)    (struct expr_node){ EN_ERROR, .AsError = (V) }
-#define NumberNode(V)   (struct expr_node){ EN_NUMBER, .AsNumber = (V) }
-#define FuncNameNode(V) (struct expr_node){ EN_FUNC_IDENT, .AsFunc = (V) }
-#define MacroNode(V)    (struct expr_node){ EN_MACRO, .AsIdent = (V) }
-#define StringNode(V)   (struct expr_node){ EN_STRING, .AsString = (V) }
-#define CellNode(V)     (struct expr_node){ EN_CELL, .AsCell = (V) }
-#define CellNode2(C,R)  (struct expr_node){ EN_CELL, .AsCell = { (C), (R) } }
+#define ErrorNode(V)     (struct expr_node){ EN_ERROR, .AsError = (V) }
+#define NumberNode(V)    (struct expr_node){ EN_NUMBER, .AsNumber = (V) }
+#define FuncNameNode(V)  (struct expr_node){ EN_FUNC_IDENT, .AsFunc = (V) }
+#define MacroNode(V)     (struct expr_node){ EN_MACRO, .AsIdent = (V) }
+#define StringNode(V)    (struct expr_node){ EN_STRING, .AsString = (V) }
+#define CellNode(V)      (struct expr_node){ EN_CELL, .AsCell = (V) }
+#define CellNode2(C,R)   (struct expr_node){ EN_CELL, .AsCell = { (C), (R) } }
+#define XenoNode2(F,C,R) (struct expr_node){ EN_XENO, .AsXeno = { { (C), (R) }, (F) } }
 
 static struct expr_node *ParseSum(struct expr_lexer *);
 
@@ -666,7 +676,7 @@ SetAsNodeFrom(struct expr_node *Node, struct cell *Cell)
     Assert(Cell);
 
     switch (Cell->Type) {
-    case CELL_NULL:     NotImplemented;
+    case CELL_NULL:     *Node = ErrorNode(ERROR_DNE); break;
     case CELL_PRETYPED: Unreachable;
     case CELL_STRING:   *Node = StringNode(Cell->AsString); break;
     case CELL_NUMBER:   *Node = NumberNode(Cell->AsNumber); break;
@@ -847,9 +857,10 @@ ParseXeno(struct expr_lexer *Lexer)
         LogError("Expected a begin-xeno token");
     }
     else {
-        struct expr_node *XenoCell = 0;
+        struct cell_ref XenoCell = { SUMMARY, SUMMARY };
+
         if (NextExprToken(Lexer, &Cell) == ET_CELL_REF) {
-            XenoCell = NodeFromToken(&Cell);
+            XenoCell = Cell.AsCell;
         }
         else {
             UngetExprToken(Lexer, &Cell);
@@ -860,7 +871,7 @@ ParseXeno(struct expr_lexer *Lexer)
         }
         else {
             *(Node = ReserveData(sizeof *Node)) = (struct expr_node){
-                EN_XENO, .AsXeno = { Begin.AsXeno, XenoCell },
+                EN_XENO, .AsXeno = { XenoCell, Begin.AsXeno },
             };
         }
     }
@@ -2019,6 +2030,85 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row, struc
             }
             break;
 
+        case EF_COL:
+            if (Arg.Type) {
+                LogError("col/0 takes no arguments");
+                *Out = ErrorNode(ERROR_ARGC);
+            }
+            else {
+                *Out = NumberNode(Col);
+            }
+            break;
+
+        case EF_ROW:
+            if (Arg.Type) {
+                LogError("row/0 takes no arguments");
+                *Out = ErrorNode(ERROR_ARGC);
+            }
+            else {
+                *Out = NumberNode(Row);
+            }
+            break;
+
+        case EF_CELL:
+            if (Arg.Type != EN_LIST) {
+                LogError("cell/2,3 takes two or three arguments");
+                *Out = ErrorNode(ERROR_ARGC);
+            }
+            else {
+                s32 NumArgs = ArgListLen(&Arg);
+                if (NumArgs == 2) {
+                    struct expr_node *Arg0, *Arg1;
+
+                    struct expr_node *List = &Arg;
+                    Arg0 = List->AsList.This; List = List->AsList.Next;
+                    Arg1 = List->AsList.This; List = List->AsList.Next;
+                    Assert(List == 0);
+
+                    if (Arg0->Type != EN_NUMBER) {
+                        LogError("cell/2 arg 0 should be a number (got %d)", Arg1->Type);
+                        *Out = ErrorNode(ERROR_TYPE);
+                    }
+                    else if (Arg1->Type != EN_NUMBER) {
+                        LogError("cell/2 arg 1 should be a number (got %d)", Arg1->Type);
+                        *Out = ErrorNode(ERROR_TYPE);
+                    }
+                    else {
+                        *Out = CellNode2(Arg0->AsNumber, Arg1->AsNumber);
+                    }
+                }
+                else if (NumArgs == 3) {
+                    struct expr_node *Arg0, *Arg1, *Arg2;
+
+                    struct expr_node *List = &Arg;
+                    Arg0 = List->AsList.This; List = List->AsList.Next;
+                    Arg1 = List->AsList.This; List = List->AsList.Next;
+                    Arg2 = List->AsList.This; List = List->AsList.Next;
+                    Assert(List == 0);
+
+                    if (Arg0->Type != EN_STRING) {
+                        LogError("cell/3 arg 0 should be a string (got %d)", Arg1->Type);
+                        *Out = ErrorNode(ERROR_TYPE);
+                    }
+                    else if (Arg1->Type != EN_NUMBER) {
+                        LogError("cell/3 arg 1 should be a number (got %d)", Arg1->Type);
+                        *Out = ErrorNode(ERROR_TYPE);
+                    }
+                    else if (Arg1->Type != EN_NUMBER) {
+                        LogError("cell/3 arg 2 should be a number (got %d)", Arg1->Type);
+                        *Out = ErrorNode(ERROR_TYPE);
+                    }
+                    else {
+                        struct expr_node XenoNode = XenoNode2(Arg0->AsString, Arg1->AsNumber, Arg2->AsNumber);
+                        ReduceNode(Doc, &XenoNode, Col, Row, Out);
+                    }
+                }
+                else {
+                    LogError("cell/2,3 takes two or three arguments");
+                }
+            }
+            break;
+
         case EF_MASK_SUM:
             if (Arg.Type != EN_LIST || ArgListLen(&Arg) != 3) {
                 LogError("mask_sum/3 takes three arguments");
@@ -2057,25 +2147,16 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row, struc
     } break;
 
     case EN_XENO: {
+        struct cell_ref Cell = Node->AsXeno.Cell;
         char *Reference = Node->AsXeno.Reference;
-        struct expr_node *Cell = Node->AsXeno.Cell;
 
         struct document *SubDoc = MakeDocument(Doc->Dir, Reference);
         if (!SubDoc) {
             *Out = ErrorNode(ERROR_FILE);
         }
         else {
-            s32 SubCol = SUMMARY;
-            s32 SubRow = SUMMARY;
-
-            if (Cell) {
-                Assert(Cell->Type == EN_CELL);
-                SubCol = Cell->AsCell.Col;
-                SubRow = Cell->AsCell.Row;
-            }
-
-            SubCol = CanonicalCol(SubDoc, SubCol, -1);
-            SubRow = CanonicalRow(SubDoc, SubRow, -1);
+            s32 SubCol = CanonicalCol(SubDoc, Cell.Col, Col);
+            s32 SubRow = CanonicalRow(SubDoc, Cell.Row, Row);
             EvaluateIntoNode(SubDoc, SubCol, SubRow, Out);
         }
     } break;
@@ -2148,7 +2229,13 @@ EvaluateCell(struct document *Doc, s32 Col, s32 Row)
                     case EF_COUNT:    printf("count/1"); break;
                     case EF_ABS:      printf("abs/1"); break;
                     case EF_SIGN:     printf("sign/1"); break;
+                    case EF_FLOOR:    printf("floor/1"); break;
+                    case EF_CEIL:     printf("ceil/1"); break;
                     case EF_NUMBER:   printf("number/+"); break;
+                    case EF_MASK_SUM: printf("mask_sum/3"); break;
+                    case EF_COL:      printf("col/0"); break;
+                    case EF_ROW:      printf("row/0"); break;
+                    case EF_CELL:     printf("cell/2,3"); break;
                     InvalidDefaultCase;
                     }
                     break;

@@ -29,7 +29,7 @@
 /* constants */
 #define DEFAULT_CELL_PRECISION 2
 #define DEFAULT_CELL_WIDTH 10
-#define MIN_CELL_WIDTH 4
+#define MIN_CELL_WIDTH 1
 #define INIT_ROW_COUNT 16 /* 0 for linear growth */
 #define INIT_COL_COUNT 8 /* 0 for linear growth */
 #define SEPERATOR "  "
