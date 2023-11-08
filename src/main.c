@@ -31,19 +31,22 @@ static struct fmt_header DefaultHeader = DEFAULT_HEADER;
 
 enum expr_func {
     EF_NULL = 0,
-    EF_BODY_ROW,
-    EF_SUM,
-    EF_AVERAGE,
-    EF_COUNT,
+
     EF_ABS,
-    EF_SIGN,
-    EF_FLOOR,
+    EF_AVERAGE,
+    EF_BODY_ROW,
     EF_CEIL,
-    EF_NUMBER,
-    EF_MASK_SUM,
-    EF_COL,
-    EF_ROW,
     EF_CELL,
+    EF_COL,
+    EF_COUNT,
+    EF_FLOOR,
+    EF_MASK_SUM,
+    EF_NUMBER,
+    EF_ROW,
+    EF_SIGN,
+    EF_SUM,
+
+    EXPR_FUNC_COUNT // meta, number of `enum expr_func` values
 };
 
 struct expr_token {
@@ -235,16 +238,6 @@ NextCell(struct row_lexer *State, char *Buf, umm Sz)
     return Type;
 }
 
-enum cmd_token {
-    CT_NULL = 0,
-
-    CT_FORMAT,
-    CT_SUMMARY,
-    CT_DEFINE,
-
-    CT_IDENT,
-};
-
 struct cmd_lexer {
     char *Cur;
 };
@@ -426,6 +419,42 @@ UngetExprToken(struct expr_lexer *State, struct expr_token *Token)
     State->Held[State->NumHeld++] = *Token;
 }
 
+enum expr_func
+MatchFunc(char *Str)
+{
+    static struct func_info {
+        enum expr_func Func;
+        char *Str;
+    } Functions[] = {
+        { EF_ABS,      "abs" },
+        { EF_AVERAGE,  "average" },
+        { EF_AVERAGE,  "avg" },
+        { EF_BODY_ROW, "bodyrow" },
+        { EF_BODY_ROW, "br" },
+        { EF_CEIL,     "ceil" },
+        { EF_CELL,     "cell" },
+        { EF_COL,      "col" },
+        { EF_COUNT,    "cnt" },
+        { EF_COUNT,    "count" },
+        { EF_FLOOR,    "floor" },
+        { EF_MASK_SUM, "mask_sum" },
+        { EF_NUMBER,   "number" },
+        { EF_ROW,      "row" },
+        { EF_SIGN,     "sign" },
+        { EF_SUM,      "sum" },
+    };
+
+    for (s32 Idx = 0; Idx < sArrayCount(Functions); ++Idx) {
+        struct func_info *Info = Functions + Idx;
+        if (StrEq(Str, Info->Str)) {
+            return Info->Func;
+        }
+    }
+
+    static_assert(EF_NULL == 0);
+    return EF_NULL;
+}
+
 static enum expr_token_type
 NextExprToken(struct expr_lexer *State, struct expr_token *Out)
 {
@@ -503,27 +532,15 @@ NextExprToken(struct expr_lexer *State, struct expr_token *Out)
             while (IsExprIdentifierChar(*State->Cur));
             *Cur = 0;
 
+            enum expr_func Function = 0;
             if (State->Buf[0] == '!') {
                 Out->Type = ET_MACRO;
                 Out->AsMacro = SaveStr(State->Buf + 1);
             }
-#define X(S) StrEq(State->Buf, S)
-#define MATCH(V,T) else if (T) { Out->Type = ET_FUNC; Out->AsFunc = V; }
-            MATCH (EF_SUM, X("sum"))
-            MATCH (EF_AVERAGE, X("avg") || X("average"))
-            MATCH (EF_COUNT, X("cnt") || X("count"))
-            MATCH (EF_BODY_ROW, X("br") || X("bodyrow"))
-            MATCH (EF_ABS, X("abs"))
-            MATCH (EF_SIGN, X("sign"))
-            MATCH (EF_FLOOR, X("floor"))
-            MATCH (EF_CEIL, X("ceil"))
-            MATCH (EF_NUMBER, X("number"))
-            MATCH (EF_MASK_SUM, X("mask_sum"))
-            MATCH (EF_COL, X("col"))
-            MATCH (EF_ROW, X("row"))
-            MATCH (EF_CELL, X("cell"))
-#undef MATCH
-#undef X
+            else if ((Function = MatchFunc(State->Buf)) != 0) {
+                Out->Type = ET_FUNC;
+                Out->AsFunc = Function;
+            }
             else {
                 bool IsCellRef = 0;
                 s32 Col, Row;
@@ -1849,6 +1866,8 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row, struc
         ReduceNode(Doc, Node->AsList.Next, Col, Row, &Arg);
 
         Assert(Func.Type == EN_FUNC_IDENT);
+        /* TODO(levirak): find a way to collapse this switch to something data
+         * driven */
         switch (Func.AsFunc) {
         case EF_BODY_ROW:
             if (!Arg.Type) {
@@ -2223,19 +2242,19 @@ EvaluateCell(struct document *Doc, s32 Col, s32 Row)
 
                 case ET_FUNC:
                     switch(Token.AsFunc) {
-                    case EF_BODY_ROW: printf("bodyrow/0,1"); break;
-                    case EF_SUM:      printf("sum/1"); break;
-                    case EF_AVERAGE:  printf("average/1"); break;
-                    case EF_COUNT:    printf("count/1"); break;
                     case EF_ABS:      printf("abs/1"); break;
-                    case EF_SIGN:     printf("sign/1"); break;
-                    case EF_FLOOR:    printf("floor/1"); break;
+                    case EF_AVERAGE:  printf("average/1"); break;
+                    case EF_BODY_ROW: printf("bodyrow/0,1"); break;
                     case EF_CEIL:     printf("ceil/1"); break;
-                    case EF_NUMBER:   printf("number/+"); break;
-                    case EF_MASK_SUM: printf("mask_sum/3"); break;
-                    case EF_COL:      printf("col/0"); break;
-                    case EF_ROW:      printf("row/0"); break;
                     case EF_CELL:     printf("cell/2,3"); break;
+                    case EF_COL:      printf("col/0"); break;
+                    case EF_COUNT:    printf("count/1"); break;
+                    case EF_FLOOR:    printf("floor/1"); break;
+                    case EF_MASK_SUM: printf("mask_sum/3"); break;
+                    case EF_NUMBER:   printf("number/+"); break;
+                    case EF_ROW:      printf("row/0"); break;
+                    case EF_SIGN:     printf("sign/1"); break;
+                    case EF_SUM:      printf("sum/1"); break;
                     InvalidDefaultCase;
                     }
                     break;
