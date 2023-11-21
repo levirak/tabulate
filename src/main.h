@@ -29,10 +29,10 @@
 /* constants */
 #define DEFAULT_CELL_PRECISION 2
 #define DEFAULT_CELL_WIDTH 10
-#define MIN_CELL_WIDTH 1
-#define INIT_ROW_COUNT 16 /* 0 for linear growth */
-#define INIT_COL_COUNT 8 /* 0 for linear growth */
-#define SEPERATOR "  "
+#define MIN_COLUMN_WIDTH 2
+#define INIT_ROW_COUNT 16
+#define INIT_COL_COUNT 8
+#define COLUMN_SEPERATOR "  "
 #define INIT_DOC_CACHE_SIZE 32
 
 #define BRACKETED (BRACKET_CELLS || OVERDRAW_COL || OVERDRAW_ROW)

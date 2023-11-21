@@ -9,6 +9,10 @@
 static void *Alloc(umm Sz) { return NotNull(malloc(Sz)); }
 static void *Realloc(void *Ptr, umm Sz) { return NotNull(realloc(Ptr, Sz)); }
 
+static void *ZeroAlloc(umm Sz) {
+    return memset(Alloc(Sz), 0, Sz);
+}
+
 static char *
 CategoryString(enum page_categories Category)
 {
@@ -270,7 +274,7 @@ PrintAllMemInfo(void)
     }
     else for (umm Idx = 0; Idx < DocCache.Used; ++Idx) {
         struct document *This = DocCache.Data[Idx];
-        struct doc_cells *Table = &This->Table;
+        struct table *Table = &This->Table;
 
         umm TableSize = Table->Rows * Table->Cols * sizeof *Table->Cells;
         umm TableUsed = This->Rows * This->Cols * sizeof *Table->Cells;
@@ -324,6 +328,7 @@ static void
 DeleteDocument(struct document *Doc)
 {
     if (Doc) {
+        free(Doc->Table.Columns);
         free(Doc->Table.Cells);
         free(Doc);
     }
@@ -413,59 +418,39 @@ AllocAndLogDoc()
     return DocCache.Data[Idx] = Alloc(sizeof (struct document));
 }
 
+
+
 static s32
-GetCellIdx(struct doc_cells *Table, s32 Col, s32 Row)
+GetCellIdx(struct table *Table, s32 Col, s32 Row)
 {
     Assert(0 <= Col); Assert(Col < Table->Cols);
     Assert(0 <= Row); Assert(Row < Table->Rows);
     return Row + Col*Table->Rows;
 }
 
-s32
-CellExists(struct document *Doc, s32 Col, s32 Row)
+static void
+ReserveDocumentSpace(struct document *Doc, s32 Col, s32 Row)
 {
-    return 0 <= Col && Col < Doc->Table.Cols
-        && 0 <= Row && Row < Doc->Table.Rows;
-}
-
-struct cell *
-TryGetCell(struct document *Doc, s32 Col, s32 Row)
-{
-    Assert(Doc);
-    struct cell *Cell = 0;
-
-    if (CellExists(Doc, Col, Row)) {
-        Cell = Doc->Table.Cells + GetCellIdx(&Doc->Table, Col, Row);
-    }
-
-    return Cell;
-}
-
-struct cell *
-ReserveCell(struct document *Doc, s32 Col, s32 Row)
-{
-    Assert(Doc);
-    Assert(Col >= 0);
-    Assert(Row >= 0);
-
     if (Col >= Doc->Table.Cols || Row >= Doc->Table.Rows) {
         /* resize */
-        struct doc_cells New = {
-#if INIT_COL_COUNT == 0
-            .Cols = Max(Doc->Table.Cols, Col+2),
-#else
+        struct table New = {
             .Cols = Max3(Doc->Table.Cols, NextPow2(Col+1), INIT_COL_COUNT),
-#endif
-#if INIT_ROW_COUNT == 0
-            .Rows = Max(Doc->Table.Rows, Row+2),
-#else
             .Rows = Max3(Doc->Table.Rows, NextPow2(Row+1), INIT_ROW_COUNT),
-#endif
         };
 
-        umm NewSize = sizeof *New.Cells * New.Cols * New.Rows;
-        New.Cells = Alloc(NewSize);
-        memset(New.Cells, 0, NewSize);
+        New.Columns = Alloc(sizeof *New.Columns * New.Cols);
+        New.Cells = ZeroAlloc(sizeof *New.Cells * New.Cols * New.Rows);
+
+        s32 ColIdx = 0;
+        if (Doc->Table.Columns) {
+            for (; ColIdx < Doc->Cols; ++ColIdx) {
+                New.Columns[ColIdx] = Doc->Table.Columns[ColIdx];
+            }
+            free(Doc->Table.Columns);
+        }
+        for (; ColIdx < New.Cols; ++ColIdx) {
+            New.Columns[ColIdx] = DEFAULT_COLUMN;
+        }
 
         if (Doc->Table.Cells) {
             for (s32 ColIdx = 0; ColIdx < Doc->Cols; ++ColIdx) {
@@ -480,6 +465,77 @@ ReserveCell(struct document *Doc, s32 Col, s32 Row)
 
         Doc->Table = New;
     }
+}
+
+
+
+s32
+ColumnExists(struct document *Doc, s32 Col)
+{
+    return 0 <= Col && Col < Doc->Table.Cols;
+}
+
+struct column *
+GetColumn(struct document *Doc, s32 Col)
+{
+    Assert(Doc);
+    Assert(ColumnExists(Doc, Col));
+    return Doc->Table.Columns + Col;
+}
+
+struct column *
+TryGetColumn(struct document *Doc, s32 Col)
+{
+    return ColumnExists(Doc, Col)? GetColumn(Doc, Col): 0;
+}
+
+struct column *
+ReserveColumn(struct document *Doc, s32 Col)
+{
+    Assert(Doc);
+    Assert(Col >= 0);
+
+    ReserveDocumentSpace(Doc, Col, 0);
+
+    Doc->Cols = Max(Doc->Cols, Col+1);
+
+    Assert(Doc->Cols <= Doc->Table.Cols);
+    Assert(Doc->Rows <= Doc->Table.Rows);
+    Assert(Doc->Table.Columns);
+    return GetColumn(Doc, Col);
+}
+
+
+
+s32
+CellExists(struct document *Doc, s32 Col, s32 Row)
+{
+    return 0 <= Col && Col < Doc->Table.Cols
+        && 0 <= Row && Row < Doc->Table.Rows;
+}
+
+struct cell *
+GetCell(struct document *Doc, s32 Col, s32 Row)
+{
+    Assert(Doc);
+    Assert(CellExists(Doc, Col, Row));
+    return Doc->Table.Cells + GetCellIdx(&Doc->Table, Col, Row);
+}
+
+struct cell *
+TryGetCell(struct document *Doc, s32 Col, s32 Row)
+{
+    return CellExists(Doc, Col, Row)? GetCell(Doc, Col, Row): 0;
+}
+
+struct cell *
+ReserveCell(struct document *Doc, s32 Col, s32 Row)
+{
+    Assert(Doc);
+    Assert(Col >= 0);
+    Assert(Row >= 0);
+
+    ReserveDocumentSpace(Doc, Col, Row);
 
     Doc->Cols = Max(Doc->Cols, Col+1);
     Doc->Rows = Max(Doc->Rows, Row+1);

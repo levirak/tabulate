@@ -12,12 +12,11 @@ struct fmt_header {
         ALIGN_RIGHT,
         ALIGN_LEFT,
     } Align: 8;
-    u8 Width;
     u8 Prcsn;
     enum {
         SET_ALIGN = 0x01,
-        SET_WIDTH = 0x02,
-        SET_PRCSN = 0x04,
+        SET_PRCSN = 0x02,
+        /* SET_ = 0x04, */
         /* SET_ = 0x08, */
         /* SET_ = 0x10, */
         /* SET_ = 0x20, */
@@ -27,7 +26,15 @@ struct fmt_header {
         SET_ALL = 0xff,
     } SetMask: 8;
 };
-#define DEFAULT_HEADER ((struct fmt_header){ 0, DEFAULT_CELL_WIDTH, DEFAULT_CELL_WIDTH, SET_ALL })
+static_assert(sizeof (struct fmt_header) == 4);
+#define DEFAULT_HEADER ((struct fmt_header){ 0, DEFAULT_CELL_PRECISION, SET_ALL })
+
+struct column {
+    s32 Width;
+    char *Sep; // ignored for first column
+};
+static_assert(sizeof (struct column) == 16);
+#define DEFAULT_COLUMN ((struct column){ DEFAULT_CELL_WIDTH, COLUMN_SEPERATOR })
 
 enum expr_error {
     ERROR_SUCCESS = 0,
@@ -76,8 +83,9 @@ struct cell {
 
 struct document {
     s32 Cols, Rows;
-    struct doc_cells {
+    struct table {
         s32 Cols, Rows;
+        struct column *Columns;
         struct cell *Cells;
     } Table;
     fd Dir;
@@ -91,7 +99,7 @@ struct document {
     s32 FirstFootRow;
 
     /* TODO(lrak): better macro storage */
-#define MACRO_MAX_COUNT 16
+#define MACRO_MAX_COUNT 32
     s32 NumMacros;
     struct macro_def {
         char *Name;
@@ -102,9 +110,14 @@ struct document {
 struct document *FindExistingDoc(dev_t Device, ino_t Inode);
 struct document *AllocAndLogDoc();
 
+s32 ColumnExists(struct document *Doc, s32 Col);
+struct column *GetColumn(struct document *Doc, s32 Col);
+struct column *TryGetColumn(struct document *Doc, s32 Col);
+struct column *ReserveColumn(struct document *Doc, s32 Col);
+
 s32 CellExists(struct document *Doc, s32 Col, s32 Row);
+struct cell *GetCell(struct document *Doc, s32 Col, s32 Row);
 struct cell *TryGetCell(struct document *Doc, s32 Col, s32 Row);
-#define GetCell(...) (NotNull(TryGetCell(__VA_ARGS__)))
 struct cell *ReserveCell(struct document *Doc, s32 Col, s32 Row);
 
 

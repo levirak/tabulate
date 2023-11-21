@@ -146,7 +146,6 @@ MergeHeader(struct fmt_header *Dst, struct fmt_header *Src)
 {
 #define X(F,M) if (!(Dst->SetMask & F)) { Dst->M = Src->M; }
     X(SET_ALIGN, Align);
-    X(SET_WIDTH, Width);
     X(SET_PRCSN, Prcsn);
 #undef X
     Dst->SetMask |= Src->SetMask;
@@ -1140,7 +1139,7 @@ MakeDocument(fd Dir, char *Path)
 #endif
 
         s32 RowIdx = 0;
-        s32 FmtIdx = -1;
+        s32 FmtRowIdx = -1;
         enum line_type LineType;
         while ((LineType = ReadLine(File, Buf, sizeof Buf))) {
 #if PREPRINT_ROWS
@@ -1152,7 +1151,7 @@ MakeDocument(fd Dir, char *Path)
             case LINE_COMMENT: Prefix = "REM"; break;
                             InvalidDefaultCase;
             }
-            printf("%s%c", Prefix, FmtIdx < 0? '.': '!');
+            printf("%s%c", Prefix, FmtRowIdx < 0? '.': '!');
 #endif
             switch (LineType) {
             case LINE_EMPTY:
@@ -1162,7 +1161,7 @@ MakeDocument(fd Dir, char *Path)
                 else {
                     Doc->FirstFootRow = RowIdx;
                 }
-                FmtIdx = -1;
+                FmtRowIdx = -1;
                 break;
 
             case LINE_ROW: {
@@ -1203,9 +1202,8 @@ MakeDocument(fd Dir, char *Path)
                     }
 #endif
 
-                    if (FmtIdx >= 0 && FmtIdx != RowIdx) {
-                        struct cell *FmtCell;
-                        FmtCell = GetCell(Doc, ColIdx, FmtIdx);
+                    if (FmtRowIdx >= 0 && FmtRowIdx != RowIdx) {
+                        struct cell *FmtCell = GetCell(Doc, ColIdx, FmtRowIdx);
                         MergeHeader(&Cell->Fmt, &FmtCell->Fmt);
                     }
 
@@ -1221,6 +1219,7 @@ MakeDocument(fd Dir, char *Path)
                 enum {
                     STATE_FIRST = 0,
 
+                    STATE_SEP,
                     STATE_FMT,
                     STATE_PRCSN,
                     STATE_SUMMARY,
@@ -1238,15 +1237,30 @@ MakeDocument(fd Dir, char *Path)
                     case STATE_FIRST:
 #define MATCH(S,V,...) else if (StrEq(CmdBuf, S)) { State = V; __VA_ARGS__; }
                         if (0);
+                        MATCH ("sep", STATE_SEP)
                         MATCH ("fmt", STATE_FMT)
-                        MATCH ("prcsn", STATE_PRCSN, FmtIdx = RowIdx)
+                        MATCH ("prcsn", STATE_PRCSN, FmtRowIdx = RowIdx)
                         MATCH ("summary", STATE_SUMMARY)
                         MATCH ("define", STATE_DEFINE)
                         else { State = STATE_ERROR; }
 #undef MATCH
                         break;
 
+                    case STATE_SEP: {
+                        if (StrEq(CmdBuf, "-")) {
+                            /* do not set this column */
+                        }
+                        else if (StrEq(CmdBuf, "|")) {
+                            ReserveColumn(Doc, ArgPos)->Sep = " │ ";
+                        }
+                        else {
+                            NotImplemented;
+                        }
+                    } break;
+
                     case STATE_FMT: {
+                        s32 ColIdx = ArgPos - 1;
+                        struct column *Column = ReserveColumn(Doc, ColIdx);
                         struct fmt_header New = DEFAULT_HEADER;
                         char *Cur = CmdBuf;
 
@@ -1262,9 +1276,10 @@ MakeDocument(fd Dir, char *Path)
                             }
 
                             if (isdigit(*Cur)) {
-                                New.Width = 0;
-                                do New.Width = 10*New.Width + (*Cur-'0');
+                                s32 Width = 0;
+                                do Width = 10*Width + (*Cur-'0');
                                 while (isdigit(*++Cur));
+                                Column->Width = Max(Width, MIN_COLUMN_WIDTH);
                             }
 
                             if (*Cur == '.') {
@@ -1276,14 +1291,13 @@ MakeDocument(fd Dir, char *Path)
                                 }
                             }
 
-                            struct cell *TopCell;
-                            TopCell = ReserveCell(Doc, ArgPos-1, 0);
+                            struct cell *TopCell = ReserveCell(Doc, ColIdx, 0);
                             MergeHeader(&TopCell->Fmt, &New);
                         }
                     } break;
 
                     case STATE_PRCSN: {
-                        Assert(FmtIdx == RowIdx);
+                        Assert(FmtRowIdx == RowIdx);
                         u8 Prcsn = DEFAULT_CELL_PRECISION;
                         char *Cur = CmdBuf;
 
@@ -1293,7 +1307,7 @@ MakeDocument(fd Dir, char *Path)
                             /* do not set this column */
                         }
                         if (StrEq(Cur, "reset")) {
-                            FmtIdx = -1;
+                            FmtRowIdx = -1;
                             State = STATE_ERROR;
                         }
                         else {
@@ -1304,7 +1318,7 @@ MakeDocument(fd Dir, char *Path)
                             }
 
                             struct cell *Cell;
-                            Cell = ReserveCell(Doc, ArgPos-1, FmtIdx);
+                            Cell = ReserveCell(Doc, ArgPos-1, FmtRowIdx);
                             Cell->Fmt.Prcsn = Prcsn;
                             Cell->Fmt.SetMask |= SET_PRCSN;
                         }
@@ -2339,11 +2353,9 @@ PrintDocument(struct document *Doc)
 
         struct fmt_header Fmt = TopCell->Fmt;
         MergeHeader(&Fmt, &DefaultHeader);
-        Fmt.Width = Max(Fmt.Width, MIN_CELL_WIDTH);
 
         FOREACH_ROW(Doc, Row) {
             struct cell *Cell = GetCell(Doc, Col, Row);
-            Cell->Fmt.SetMask &= ~SET_WIDTH; /* overwrite cell-local width */
             MergeHeader(&Cell->Fmt, &Fmt);
         }
     }
@@ -2365,20 +2377,23 @@ PrintDocument(struct document *Doc)
         if (UnderlineRow) {
 #if BRACKETED
             FOREACH_COL(Doc, Col) {
-                struct cell *Cell = GetCell(Doc, Col, Row);
+                struct column *Column = GetColumn(Doc, Col);
+
                 putchar('.');
-                for (s32 It = 0; It < Cell->Width; ++It) putchar('-');
+                for (s32 It = 0; It < Column->Width; ++It) putchar('-');
                 putchar('.');
             }
 #else
             FOREACH_COL(Doc, Col) {
-                struct cell *Cell = GetCell(Doc, Col, Row);
-                if (Col != 0) printf("%s", SEPERATOR);
+                struct column *Column = GetColumn(Doc, Col);
+
+                if (Col != 0) printf("%s", Column->Sep);
+
                 if (IsSummaryRow && Col == Doc->Summary.Col) {
-                    for (s32 It = 0; It < Cell->Width; ++It) putchar('=');
+                    for (s32 It = 0; It < Column->Width; ++It) putchar('=');
                 }
                 else {
-                    for (s32 It = 0; It < Cell->Width; ++It) putchar('-');
+                    for (s32 It = 0; It < Column->Width; ++It) putchar('-');
                 }
             }
 #endif
@@ -2387,7 +2402,9 @@ PrintDocument(struct document *Doc)
 #endif
 
         FOREACH_COL(Doc, Col) {
+            struct column *Column = GetColumn(Doc, Col);
             struct cell *Cell = GetCell(Doc, Col, Row);
+
 #if USE_UNDERLINE
             bool Underline = 0
                     || UnderlineRow
@@ -2403,20 +2420,20 @@ PrintDocument(struct document *Doc)
 # define X(S,...) printf(S, T(UL_START), __VA_ARGS__, T(UL_END));
             switch (Cell->Type) {
             case CELL_STRING:
-                X("[%s%-*s%s]", Cell->Fmt.Width, Cell->AsString);
+                X("[%s%-*s%s]", Column->Width, Cell->AsString);
                 break;
             case CELL_NUMBER:
-                X("(%s%'*.*f%s)", Cell->Fmt.Width, Cell->Fmt.Prcsn, Cell->AsNumber);
+                X("(%s%'*.*f%s)", Column->Width, Cell->Fmt.Prcsn, Cell->AsNumber);
                 break;
             case CELL_EXPR:
-                X("{%s%-*s%s}", Cell->Fmt.Width, Cell->AsExpr);
+                X("{%s%-*s%s}", Column->Width, Cell->AsExpr);
                 break;
             case CELL_ERROR:
-                X("<%s%-*s%s>", Cell->Fmt.Width, CellErrStr(Cell->AsError));
+                X("<%s%-*s%s>", Column->Width, CellErrStr(Cell->AsError));
                 break;
             case CELL_NULL:
                 printf("!%s", T(UL_START));
-                for (s32 It = 0; It < Cell->Fmt.Width; ++It) putchar('.');
+                for (s32 It = 0; It < Column->Width; ++It) putchar('.');
                 printf("%s!", T(UL_END));
                 break;
             InvalidDefaultCase;
@@ -2424,25 +2441,25 @@ PrintDocument(struct document *Doc)
 # undef X
 # undef T
 #else
-            if (Col != 0) printf(SEPERATOR);
+            if (Col != 0) printf("%s", Column->Sep);
 #if USE_UNDERLINE
             if (Underline) printf(UL_START);
 #endif
             switch (Cell->Type) {
             case CELL_STRING:
-                printf("%-*s", Cell->Fmt.Width, Cell->AsString);
+                printf("%-*s", Column->Width, Cell->AsString);
                 break;
             case CELL_NUMBER:
             {
                 struct cell *TopCell = GetCell(Doc, Col, 0);
-                Assert(Cell->Fmt.Width == TopCell->Fmt.Width);
+
                 if (Cell->Fmt.Prcsn < TopCell->Fmt.Prcsn) {
-                    Assert(Cell->Fmt.Width > TopCell->Fmt.Prcsn);
+                    Assert(Column->Width > TopCell->Fmt.Prcsn);
                     /* TODO(lrak): this is a bit gross, but remember we have to
                      * deal with aligning decimal points even if there is no
                      * decimal point (e.g., aligning "2.5" and "1" s.t. the '2'
                      * and '1' are in the same column.) */
-                    s32 Width = Cell->Fmt.Width - TopCell->Fmt.Prcsn;
+                    s32 Width = Column->Width - TopCell->Fmt.Prcsn;
                     if (Cell->Fmt.Prcsn) {
                         Width += Cell->Fmt.Prcsn;
                     }
@@ -2450,22 +2467,22 @@ PrintDocument(struct document *Doc)
                         --Width;
                     }
                     printf("%'*.*f%*s", Width, Cell->Fmt.Prcsn, Cell->AsNumber,
-                            Cell->Fmt.Width - Width, "");
+                            Column->Width - Width, "");
                 }
                 else {
-                    printf("%'*.*f", Cell->Fmt.Width, Cell->Fmt.Prcsn,
+                    printf("%'*.*f", Column->Width, Cell->Fmt.Prcsn,
                             Cell->AsNumber);
                 }
                 break;
             }
             case CELL_EXPR:
-                printf("%-*s", Cell->Fmt.Width, Cell->AsString);
+                printf("%-*s", Column->Width, Cell->AsString);
                 break;
             case CELL_ERROR:
-                printf("%-*s", Cell->Fmt.Width, CellErrStr(Cell->AsError));
+                printf("%-*s", Column->Width, CellErrStr(Cell->AsError));
                 break;
             case CELL_NULL:
-                for (s32 It = 0; It < Cell->Fmt.Width; ++It) putchar(' ');
+                for (s32 It = 0; It < Column->Width; ++It) putchar(' ');
                 break;
             InvalidDefaultCase;
             }
@@ -2480,27 +2497,30 @@ PrintDocument(struct document *Doc)
         if (IsSummaryRow) {
 #if BRACKETED
             FOREACH_COL(Doc, Col) {
-                struct cell *Cell = GetCell(Doc, Col, Row);
+                struct column *Column = GetColumn(Doc, Col);
+
                 if (Col == Doc->Summary.Col) {
                     putchar('|');
-                    for (s32 It = 0; It < Cell->Width; ++It) putchar('^');
+                    for (s32 It = 0; It < Column->Width; ++It) putchar('^');
                     putchar('|');
                 }
                 else {
                     putchar('.');
-                    for (s32 It = 0; It < Cell->Width; ++It) putchar('.');
+                    for (s32 It = 0; It < Column->Width; ++It) putchar('.');
                     putchar('.');
                 }
             }
 #else
             FOREACH_COL(Doc, Col) {
-                struct cell *Cell = GetCell(Doc, Col, Row);
+                struct column *Column = GetColumn(Doc, Col);
+
                 if (Col != 0) printf("%s", SEPERATOR);
+
                 if (Col == Doc->Summary.Col) {
-                    for (s32 It = 0; It < Cell->Width; ++It) putchar('=');
+                    for (s32 It = 0; It < Column->Width; ++It) putchar('=');
                 }
                 else {
-                    for (s32 It = 0; It < Cell->Width; ++It) putchar(' ');
+                    for (s32 It = 0; It < Column->Width; ++It) putchar(' ');
                 }
             }
 #endif
