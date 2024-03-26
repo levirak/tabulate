@@ -25,14 +25,14 @@ char *ErrName(s32 Error);
 #   include <assert.h>
 #   include <stdlib.h>
 #   define ASSERT(E,S) if (!(E)) { LogAssert("assertion `%s' failed.", S); abort(); }
-#   define CheckEq(E,V) ({ __auto_type A=(E); ASSERT(A==(V), #E" == "#V); A; })
-#   define CheckNe(E,V) ({ __auto_type A=(E); ASSERT(A!=(V), #E" != "#V); A; })
-#   define CheckGt(E,V) ({ __auto_type A=(E); ASSERT(A>(V), #E" > "#V); A; })
-#   define CheckLt(E,V) ({ __auto_type A=(E); ASSERT(A<(V), #E" < "#V); A; })
-#   define CheckGe(E,V) ({ __auto_type A=(E); ASSERT(A>=(V), #E" >= "#V); A; })
-#   define CheckLe(E,V) ({ __auto_type A=(E); ASSERT(A<=(V), #E" <= "#V); A; })
-#   define NotNull(E)   ({ __auto_type A=(E); ASSERT(A, #E " is not NULL"); A; })
-#   define Assert(E) assert(E)
+#   define CheckEq(E,V) ({ auto A=(E); ASSERT(A==(V), #E" == "#V); A; })
+#   define CheckNe(E,V) ({ auto A=(E); ASSERT(A!=(V), #E" != "#V); A; })
+#   define CheckGt(E,V) ({ auto A=(E); ASSERT(A>(V), #E" > "#V); A; })
+#   define CheckLt(E,V) ({ auto A=(E); ASSERT(A<(V), #E" < "#V); A; })
+#   define CheckGe(E,V) ({ auto A=(E); ASSERT(A>=(V), #E" >= "#V); A; })
+#   define CheckLe(E,V) ({ auto A=(E); ASSERT(A<=(V), #E" <= "#V); A; })
+#   define NotNull(E)   ({ auto A=(E); ASSERT(A, #E " is not NULL"); A; })
+#   define Assert(E) ASSERT(E, #E)
 #   undef InvalidCodePath
 #   define InvalidCodePath ({ LogAssert("invalid code path"); abort(); })
 #   undef NotImplemented

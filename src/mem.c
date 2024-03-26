@@ -6,11 +6,15 @@
 #include <string.h>
 #include <stdlib.h>
 
-static void *Alloc(umm Sz) { return NotNull(malloc(Sz)); }
-static void *Realloc(void *Ptr, umm Sz) { return NotNull(realloc(Ptr, Sz)); }
+static inline void *Alloc(umm Sz) { return NotNull(malloc(Sz)); }
+static inline void *Realloc(void *Ptr, umm Sz) { return NotNull(realloc(Ptr, Sz)); }
 
-static void *ZeroAlloc(umm Sz) {
-    return memset(Alloc(Sz), 0, Sz);
+static inline void *
+ZeroAlloc(umm Sz)
+{
+    void *Mem = Alloc(Sz);
+    memset(Mem, 0, Sz);
+    return Mem;
 }
 
 static char *
@@ -31,13 +35,13 @@ struct page {
     struct page *Next;
     u32 Size;
     u32 Used;
-} *Category[TOTAL_CATEGORIES] = {0};
+} *Category[TOTAL_CATEGORIES] = {};
 
 struct doc_cache {
     struct document **Data;
     umm Used;
     umm Size;
-} DocCache = {0};
+} DocCache = {};
 
 #if DEDUPLICATE_STRINGS
 struct hash_table {
@@ -47,7 +51,7 @@ struct hash_table {
     } *Data;
     umm Size;
     umm Used;
-} StringTable = {0};
+} StringTable = {};
 
 /* An implementation of djb2 from http://www.cse.yorku.ca/~oz/hash.html */
 static u64
@@ -209,6 +213,7 @@ ReserveData(u32 Sz)
 char *
 SaveStr(char *Str)
 {
+    Assert(Str);
 #if DEDUPLICATE_STRINGS
     struct hash_pair *Entry = NotNull(FindOrReserve(Str));
     char *New = Entry->Str;
@@ -341,7 +346,7 @@ ReleaseAllMem(void)
         DeleteDocument(DocCache.Data[Idx]);
     }
     free(DocCache.Data);
-    DocCache = (struct doc_cache){0};
+    DocCache = (struct doc_cache){};
 
     for (s32 Idx = 0; Idx < TOTAL_CATEGORIES; ++Idx) {
         struct page *This, *Next;
@@ -356,7 +361,7 @@ ReleaseAllMem(void)
 #if DEDUPLICATE_STRINGS
     if (StringTable.Data) {
         free(StringTable.Data);
-        StringTable = (struct hash_table){0};
+        StringTable = (struct hash_table){};
     }
 #endif
 }
@@ -388,10 +393,13 @@ DumpMemInfo(enum page_categories Type, char *Prefix)
 struct document *
 FindExistingDoc(dev_t Device, ino_t Inode)
 {
-    Assert(DocCache.Data? 1: DocCache.Size == 0);
+    Assert(false
+        || (!DocCache.Data && DocCache.Size == 0 && DocCache.Used == 0)
+        || (DocCache.Data && DocCache.Used <= DocCache.Size)
+    );
     struct document *Doc = 0;
     for (umm Idx = 0; Idx < DocCache.Used; ++Idx) {
-        struct document *This = DocCache.Data[Idx];
+        struct document *This = NotNull(DocCache.Data[Idx]);
         if (This->Device == Device && This->Inode == Inode) {
             Assert(!Doc);
             Doc = This;
@@ -431,16 +439,18 @@ GetCellIdx(struct table *Table, s32 Col, s32 Row)
 static void
 ReserveDocumentSpace(struct document *Doc, s32 Col, s32 Row)
 {
+    Assert(Doc);
     if (Col >= Doc->Table.Cols || Row >= Doc->Table.Rows) {
-        /* resize */
+        s32 NewCols = Max3(Doc->Table.Cols, NextPow2(Col+1), INIT_COL_COUNT);
+        s32 NewRows = Max3(Doc->Table.Rows, NextPow2(Row+1), INIT_ROW_COUNT);
         struct table New = {
-            .Cols = Max3(Doc->Table.Cols, NextPow2(Col+1), INIT_COL_COUNT),
-            .Rows = Max3(Doc->Table.Rows, NextPow2(Row+1), INIT_ROW_COUNT),
+            .Cols = NewCols,
+            .Rows = NewRows,
+            .Columns = Alloc(sizeof *New.Columns * NewCols),
+            .Cells = ZeroAlloc(sizeof *New.Cells * NewCols * NewRows),
         };
 
-        New.Columns = Alloc(sizeof *New.Columns * New.Cols);
-        New.Cells = ZeroAlloc(sizeof *New.Cells * New.Cols * New.Rows);
-
+        /* init New.Columns */
         s32 ColIdx = 0;
         if (Doc->Table.Columns) {
             for (; ColIdx < Doc->Cols; ++ColIdx) {
@@ -452,6 +462,7 @@ ReserveDocumentSpace(struct document *Doc, s32 Col, s32 Row)
             New.Columns[ColIdx] = DEFAULT_COLUMN;
         }
 
+        /* init New.Cells */
         if (Doc->Table.Cells) {
             for (s32 ColIdx = 0; ColIdx < Doc->Cols; ++ColIdx) {
                 for (s32 RowIdx = 0; RowIdx < Doc->Rows; ++RowIdx) {
@@ -466,7 +477,6 @@ ReserveDocumentSpace(struct document *Doc, s32 Col, s32 Row)
         Doc->Table = New;
     }
 }
-
 
 
 s32

@@ -34,7 +34,7 @@ enum expr_func {
 
     EF_ABS,
     EF_AVERAGE,
-    EF_BODY_ROW,
+    EF_BODY_COL,
     EF_CEIL,
     EF_CELL,
     EF_COL,
@@ -46,8 +46,9 @@ enum expr_func {
     EF_SIGN,
     EF_SUM,
 
-    EXPR_FUNC_COUNT // meta, number of `enum expr_func` values
+    EXPR_FUNC_COUNT,
 };
+
 
 struct expr_token {
     enum expr_token_type {
@@ -144,10 +145,8 @@ ReadLine(FILE *File, char *Buf, umm Sz)
 static struct fmt_header *
 MergeHeader(struct fmt_header *Dst, struct fmt_header *Src)
 {
-#define X(F,M) if (!(Dst->SetMask & F)) { Dst->M = Src->M; }
-    X(SET_ALIGN, Align);
-    X(SET_PRCSN, Prcsn);
-#undef X
+    if (!(Dst->SetMask & SET_ALIGN)) Dst->Align = Src->Align;
+    if (!(Dst->SetMask & SET_PRCSN)) Dst->Prcsn = Src->Prcsn;
     Dst->SetMask |= Src->SetMask;
     return Dst;
 }
@@ -428,8 +427,10 @@ MatchFunc(char *Str)
         { EF_ABS,      "abs" },
         { EF_AVERAGE,  "average" },
         { EF_AVERAGE,  "avg" },
-        { EF_BODY_ROW, "bodyrow" },
-        { EF_BODY_ROW, "br" },
+        { EF_BODY_COL, "bc" },
+        { EF_BODY_COL, "bodycol" },
+        { EF_BODY_COL, "bodyrow" }, // TODO(levirak): depricated name
+        { EF_BODY_COL, "br" },      // TODO(levirak): depricated name
         { EF_CEIL,     "ceil" },
         { EF_CELL,     "cell" },
         { EF_COL,      "col" },
@@ -574,29 +575,28 @@ PeekExprToken(struct expr_lexer *State, struct expr_token *Out)
     return Out->Type;
 }
 
-#if 0 /* parsing */
-Root     := Sum $
-Sum      := Prod SumCont?
-SumCont  := [+-] Prod SumCont?
-Prod     := PreTerm ProdCont?
-ProdCont := [*/] PreTerm ProdCont?
-List     := Sum ListCont?
-ListCont := ';' Sum ListCont?
-PreTerm  := Term
-PreTerm  := '-' Term
-Term     := Func
-Term     := Range
-Term     := Xeno
-Term     := Macro
-Term     := '(' Sum ')'
-Term     := number
-Func     := ident '(' List ')'
-Func     := ident Sum?
-Xeno     := '{*:' cell '}'
-Range    := cell
-Range    := cell ':'
-Range    := cell ':' cell
-#endif
+// *** PARSING ***
+// Root     := Sum $
+// Sum      := Prod SumCont?
+// SumCont  := [+-] Prod SumCont?
+// Prod     := PreTerm ProdCont?
+// ProdCont := [*/] PreTerm ProdCont?
+// List     := Sum ListCont?
+// ListCont := ';' Sum ListCont?
+// PreTerm  := Term
+// PreTerm  := '-' Term
+// Term     := Func
+// Term     := Range
+// Term     := Xeno
+// Term     := Macro
+// Term     := '(' Sum ')'
+// Term     := number
+// Func     := ident '(' List ')'
+// Func     := ident Sum?
+// Xeno     := '{*:' cell '}'
+// Range    := cell
+// Range    := cell ':'
+// Range    := cell ':' cell
 
 enum expr_operator {
     EN_OP_NULL = 0,
@@ -1513,10 +1513,10 @@ SumRange(struct document *Doc, f64 *Out, struct cell_block *Range)
     Assert(Range);
 
     enum expr_error Error = 0;
-    s32 FirstCol = Bound(0, Range->FirstCol, Doc->Cols);
-    s32 FirstRow = Bound(0, Range->FirstRow, Doc->Rows);
-    s32 LastCol = Bound(0, Range->LastCol, Doc->Cols);
-    s32 LastRow = Bound(0, Range->LastRow, Doc->Rows);
+    s32 FirstCol = Clamp(0, Range->FirstCol, Doc->Cols);
+    s32 FirstRow = Clamp(0, Range->FirstRow, Doc->Rows);
+    s32 LastCol = Clamp(0, Range->LastCol, Doc->Cols);
+    s32 LastRow = Clamp(0, Range->LastRow, Doc->Rows);
 
     f64 Acc = 0;
     for (s32 Col = FirstCol; Col <= LastCol; ++Col) {
@@ -1541,10 +1541,10 @@ AverageRange(struct document *Doc, f64 *Out, struct cell_block *Range)
     Assert(Range);
 
     enum expr_error Error = 0;
-    s32 FirstCol = Bound(0, Range->FirstCol, Doc->Cols);
-    s32 FirstRow = Bound(0, Range->FirstRow, Doc->Rows);
-    s32 LastCol = Bound(0, Range->LastCol, Doc->Cols);
-    s32 LastRow = Bound(0, Range->LastRow, Doc->Rows);
+    s32 FirstCol = Clamp(0, Range->FirstCol, Doc->Cols);
+    s32 FirstRow = Clamp(0, Range->FirstRow, Doc->Rows);
+    s32 LastCol = Clamp(0, Range->LastCol, Doc->Cols);
+    s32 LastRow = Clamp(0, Range->LastRow, Doc->Rows);
 
     f64 Sum = 0;
     f64 Count = 0;
@@ -1571,10 +1571,10 @@ CountRange(struct document *Doc, f64 *Out, struct cell_block *Range)
     Assert(Range);
 
     enum expr_error Error = 0;
-    s32 FirstCol = Bound(0, Range->FirstCol, Doc->Cols);
-    s32 FirstRow = Bound(0, Range->FirstRow, Doc->Rows);
-    s32 LastCol = Bound(0, Range->LastCol, Doc->Cols);
-    s32 LastRow = Bound(0, Range->LastRow, Doc->Rows);
+    s32 FirstCol = Clamp(0, Range->FirstCol, Doc->Cols);
+    s32 FirstRow = Clamp(0, Range->FirstRow, Doc->Rows);
+    s32 LastCol = Clamp(0, Range->LastCol, Doc->Cols);
+    s32 LastRow = Clamp(0, Range->LastRow, Doc->Rows);
 
     f64 Acc = 0;
     for (s32 Col = FirstCol; Col <= LastCol; ++Col) {
@@ -1883,7 +1883,7 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row, struc
         /* TODO(levirak): find a way to collapse this switch to something data
          * driven */
         switch (Func.AsFunc) {
-        case EF_BODY_ROW:
+        case EF_BODY_COL:
             if (!Arg.Type) {
                 *Out = (struct expr_node){ EN_RANGE, .AsRange = {
                     Col, Doc->FirstBodyRow,
@@ -1891,7 +1891,7 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row, struc
                 }};
             }
             else if (Arg.Type != EN_NUMBER) {
-                LogError("bodyrow/1 takes a number");
+                LogError("bodycol/1 takes a number");
                 *Out = ErrorNode(ERROR_TYPE);
             }
             else {
@@ -2258,7 +2258,7 @@ EvaluateCell(struct document *Doc, s32 Col, s32 Row)
                     switch(Token.AsFunc) {
                     case EF_ABS:      printf("abs/1"); break;
                     case EF_AVERAGE:  printf("average/1"); break;
-                    case EF_BODY_ROW: printf("bodyrow/0,1"); break;
+                    case EF_BODY_COL: printf("bodycol/0,1"); break;
                     case EF_CEIL:     printf("ceil/1"); break;
                     case EF_CELL:     printf("cell/2,3"); break;
                     case EF_COL:      printf("col/0"); break;

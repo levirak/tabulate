@@ -4,12 +4,55 @@
 
 #include <ctype.h>
 
-#define DEFINE(T,L) T NextPow2_##T(T A) { --A; L; ++A; return A | (A == 0); }
-#define X(S) (A |= A >> S)
-NEXT_POW_2_DEF_LIST
-#undef X
-#undef DEFINE
+u8
+NextPow2_u8(u8 A)
+{
+    --A;
+    A |= A >> 1;
+    A |= A >> 2;
+    A |= A >> 4;
+    ++A;
+    return A | (A == 0);
+}
 
+u16
+NextPow2_u16(u16 A)
+{
+    --A;
+    A |= A >> 1;
+    A |= A >> 2;
+    A |= A >> 4;
+    A |= A >> 8;
+    ++A;
+    return A | (A == 0);
+}
+
+u32
+NextPow2_u32(u32 A)
+{
+    --A;
+    A |= A >> 1;
+    A |= A >> 2;
+    A |= A >> 4;
+    A |= A >> 8;
+    A |= A >> 16;
+    ++A;
+    return A | (A == 0);
+}
+
+u64
+NextPow2_u64(u64 A)
+{
+    --A;
+    A |= A >> 1;
+    A |= A >> 2;
+    A |= A >> 4;
+    A |= A >> 8;
+    A |= A >> 16;
+    A |= A >> 32;
+    ++A;
+    return A | (A == 0);
+}
 
 /* TODO(lrak): precision problems? */
 f64

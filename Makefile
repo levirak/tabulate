@@ -9,11 +9,11 @@ e =
 
 CPPDIRS = -iquote $(build_dir) -iquote .
 LDDIRS  =
-LDLIBS  = -lpthread $(shell pkg-config --libs $(libraries))
+LDLIBS  = -lpthread -lm $(shell pkg-config --libs $(libraries))
 
 override CPPFLAGS := $(CPPFLAGS) $(CPPDIRS)
 override LDFLAGS  := $(LDFLAGS) $(LDDIRS)
-base_CFLAGS       := -std=gnu17 $(CFLAGS) $(shell pkg-config --cflags $(libraries))
+base_CFLAGS       := -std=gnu2x $(CFLAGS) $(shell pkg-config --cflags $(libraries))
 
 sources = $(wildcard $(source_dir)/*.c)
 objects = $(patsubst $(source_dir)/%.c,$(build_dir)/%$o,$(sources))
@@ -21,14 +21,10 @@ deps    = $(patsubst $(source_dir)/%.c,$(build_dir)/%$d,$(sources))
 target  = $(build_dir)/$(program_name)$e
 
 # The Target Build
-all: CFLAGS = -g -Og -Wall -Wextra $(base_CFLAGS) -fsanitize=address,undefined,leak
-all: $(target)
-
-debug: CFLAGS = -g -Wall -Wextra $(base_CFLAGS)
-debug: $(target)
-
-release: CFLAGS = -O2 -Wall -Wextra -DNDEBUG $(base_CFLAGS)
-release: $(target)
+all:     CFLAGS = -g -Og -Wall -Wextra $(base_CFLAGS) -fanalyzer -fsanitize=address,undefined,leak
+debug:   CFLAGS = -g -Og -Wall -Wextra $(base_CFLAGS) -fanalyzer
+release: CFLAGS = -O2 -Wall -Wextra -DNDEBUG $(base_CFLAGS) -fanalyzer
+all debug release: $(target)
 
 -include $(deps)
 $(deps): $(build_dir)/%$d: $(source_dir)/%.c
