@@ -41,6 +41,8 @@ enum expr_func {
     EF_COUNT,
     EF_FLOOR,
     EF_MASK_SUM,
+    EF_MAX,
+    EF_MIN,
     EF_NUMBER,
     EF_ROW,
     EF_SIGN,
@@ -438,6 +440,8 @@ MatchFunc(char *Str)
         { EF_COUNT,    "count" },
         { EF_FLOOR,    "floor" },
         { EF_MASK_SUM, "mask_sum" },
+        { EF_MAX,      "max" },
+        { EF_MIN,      "min" },
         { EF_NUMBER,   "number" },
         { EF_ROW,      "row" },
         { EF_SIGN,     "sign" },
@@ -665,6 +669,30 @@ struct expr_node {
 #define CellNode(V)      (struct expr_node){ EN_CELL, .AsCell = (V) }
 #define CellNode2(C,R)   (struct expr_node){ EN_CELL, .AsCell = { (C), (R) } }
 #define XenoNode2(F,C,R) (struct expr_node){ EN_XENO, .AsXeno = { { (C), (R) }, (F) } }
+
+static inline struct expr_node *
+NextOf(struct expr_node *Node)
+{
+    switch (Node->Type) {
+    case EN_LIST:
+    case EN_LIST_CONT:
+        return Node->AsList.Next;
+    default:
+        return nullptr;
+    }
+}
+
+static inline struct expr_node *
+NodeOf(struct expr_node *Node)
+{
+    switch (Node->Type) {
+    case EN_LIST:
+    case EN_LIST_CONT:
+        return Node->AsList.This;
+    default:
+        return Node;
+    }
+}
 
 static struct expr_node *ParseSum(struct expr_lexer *);
 
@@ -2036,26 +2064,15 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row, struc
             }
             else {
                 f64 Number = 0;
-                struct expr_node *This = &Arg;
-                for (struct expr_node *Next = 0; This; This = Next) {
-                    struct expr_node *Element;
-                    switch (This->Type) {
-                    case EN_LIST:
-                    case EN_LIST_CONT:
-                        Element = This->AsList.This;
-                        Next = This->AsList.Next;
-                        break;
-                    default:
-                        Element = This;
-                        Next = 0;
-                    }
+                for (struct expr_node *It = &Arg; It; It = NextOf(It)) {
+                    struct expr_node *This = NodeOf(It);
 
-                    if (Element->Type == EN_NUMBER) {
-                        if (isnan(Element->AsNumber)) { /* ignored */ }
-                        else if (isinf(Element->AsNumber)) { /* ignored */ }
+                    if (This->Type == EN_NUMBER) {
+                        if (isnan(This->AsNumber)) { /* ignored */ }
+                        else if (isinf(This->AsNumber)) { /* ignored */ }
                         else {
-                            Number = Element->AsNumber;
-                            Next = 0; /* early out of this loop */
+                            Number = This->AsNumber;
+                            break; /* early out of this loop */
                         }
                     }
                 }
@@ -2175,6 +2192,48 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row, struc
             }
             break;
 
+        case EF_MAX:
+            if (!Arg.Type) {
+                LogError("max/+ takes at least one argument");
+                *Out = ErrorNode(ERROR_ARGC);
+            }
+            else {
+                bool Any = false;
+                f64 Number = -INFINITY;
+                for (struct expr_node *It = &Arg; It; It = NextOf(It)) {
+                    struct expr_node *This = NodeOf(It);
+
+                    if (This->Type == EN_NUMBER) {
+                        Number = Max(Number, This->AsNumber);
+                        Any = true;
+                    }
+                    /* TODO(levirak): handle EN_RANGE? */
+                }
+                *Out = NumberNode(Any? Number: 0);
+            }
+            break;
+
+        case EF_MIN:
+            if (!Arg.Type) {
+                LogError("min/+ takes at least one argument");
+                *Out = ErrorNode(ERROR_ARGC);
+            }
+            else {
+                bool Any = false;
+                f64 Number = INFINITY;
+                for (struct expr_node *It = &Arg; It; It = NextOf(It)) {
+                    struct expr_node *This = NodeOf(It);
+
+                    if (This->Type == EN_NUMBER) {
+                        Number = Min(Number, This->AsNumber);
+                        Any = true;
+                    }
+                    /* TODO(levirak): handle EN_RANGE? */
+                }
+                *Out = NumberNode(Any? Number: 0);
+            }
+            break;
+
         InvalidDefaultCase;
         }
     } break;
@@ -2265,6 +2324,8 @@ EvaluateCell(struct document *Doc, s32 Col, s32 Row)
                     case EF_COUNT:    printf("count/1"); break;
                     case EF_FLOOR:    printf("floor/1"); break;
                     case EF_MASK_SUM: printf("mask_sum/3"); break;
+                    case EF_MAX:      printf("max/+"); break;
+                    case EF_MIN:      printf("min/+"); break;
                     case EF_NUMBER:   printf("number/+"); break;
                     case EF_ROW:      printf("row/0"); break;
                     case EF_SIGN:     printf("sign/1"); break;
