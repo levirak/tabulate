@@ -44,6 +44,8 @@ enum expr_func {
     EF_MAX,
     EF_MIN,
     EF_NUMBER,
+    EF_PCENT,
+    EF_POW,
     EF_ROW,
     EF_SIGN,
     EF_SUM,
@@ -443,6 +445,8 @@ MatchFunc(char *Str)
         { EF_MAX,      "max" },
         { EF_MIN,      "min" },
         { EF_NUMBER,   "number" },
+        { EF_PCENT,    "pcent" },
+        { EF_POW,      "pow" },
         { EF_ROW,      "row" },
         { EF_SIGN,     "sign" },
         { EF_SUM,      "sum" },
@@ -2237,6 +2241,45 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row, struc
             }
             break;
 
+        case EF_POW:
+            if (Arg.Type != EN_LIST || ArgListLen(&Arg) != 2) {
+                LogError("pow/2 takes two arguments");
+            }
+            else {
+                struct expr_node *Arg0, *Arg1;
+                struct expr_node *List = &Arg;
+                Arg0 = List->AsList.This; List = List->AsList.Next;
+                Arg1 = List->AsList.This; List = List->AsList.Next;
+                Assert(List == nullptr);
+                if (Arg0->Type != EN_NUMBER) {
+                    LogError("pow/2 arg 0 should be a number");
+                }
+                if (Arg1->Type != EN_NUMBER) {
+                    LogError("pow/2 arg 1 should be a number");
+                }
+                else {
+                    *Out = NumberNode(pow(Arg0->AsNumber, Arg1->AsNumber));
+                }
+            }
+            break;
+
+        case EF_PCENT:
+            if (!Arg.Type) {
+                LogError("pcent/1 takes one argument");
+                *Out = ErrorNode(ERROR_ARGC);
+            }
+            else if (Arg.Type != EN_NUMBER) {
+                LogError("pcent/1 takes a number");
+                *Out = ErrorNode(ERROR_TYPE);
+            }
+            else {
+                Assert(Arg.Type == EN_NUMBER);
+                char Buf[32];
+                snprintf(Buf, sizeof Buf, "%0.2f%%", 100*Arg.AsNumber);
+                *Out = StringNode(SaveStr(Buf)); /* TODO(levirak): is this leaking? */
+            }
+            break;
+
         default_unreachable;
         }
     } break;
@@ -2509,9 +2552,16 @@ PrintDocument(struct document *Doc)
 #if USE_UNDERLINE
             if (Underline) printf(UL_START);
 #endif
+            s32 Align = 1;
+            switch (Cell->Fmt.Align) {
+            case ALIGN_LEFT: Align = -1; break;
+            case ALIGN_RIGHT: Align = 1; break;
+            default_unreachable;
+            }
+
             switch (Cell->Type) {
             case CELL_STRING:
-                printf("%-*s", Column->Width, Cell->AsString);
+                printf("%*s", Align*Column->Width, Cell->AsString);
                 break;
 
             case CELL_NUMBER: {
@@ -2540,14 +2590,17 @@ PrintDocument(struct document *Doc)
             } break;
 
             case CELL_EXPR:
-                printf("%-*s", Column->Width, Cell->AsString);
+                printf("%*s", Align*Column->Width, Cell->AsString);
                 break;
+
             case CELL_ERROR:
-                printf("%-*s", Column->Width, CellErrStr(Cell->AsError));
+                printf("%*s", Align*Column->Width, CellErrStr(Cell->AsError));
                 break;
+
             case CELL_NULL:
-                for (s32 It = 0; It < Column->Width; ++It) putchar(' ');
+                printf("%*s", Align*Column->Width, "");
                 break;
+
             default_unreachable;
             }
 #if USE_UNDERLINE

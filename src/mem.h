@@ -8,9 +8,8 @@ struct cell_ref {
 
 struct fmt_header {
     enum cell_alignment {
-        ALIGN_DEFAULT = 0,
+        ALIGN_LEFT = 0,
         ALIGN_RIGHT,
-        ALIGN_LEFT,
     } Align: 8;
     u8 Prcsn;
     enum {
