@@ -128,7 +128,7 @@ ReadLine(FILE *File, char *Buf, umm Sz)
         else {
             Type = LINE_COMMENT;
         }
-        fallthrough;
+        [[fallthrough]];
     default:
         while (Char != EOF && Char != '\n') {
             if (Buf < End) *Buf++ = Char;
@@ -219,7 +219,7 @@ NextCell(struct row_lexer *State, char *Buf, umm Sz)
     case '=':
         Type = CELL_EXPR;
         ++State->Cur;
-        fallthrough;
+        [[fallthrough]];
     default:
         while (*State->Cur) {
             if (*State->Cur == '\t' || *State->Cur == '\n') {
@@ -362,7 +362,7 @@ AbsoluteDim(s32 Dim, s32 This)
     case PREV: Dim = This - 1; break;
     case THIS: Dim = This; break;
     case NEXT: Dim = This + 1; break;
-    InvalidDefaultCase;
+    default_unreachable;
     }
     return CheckGe(Dim, 0);
 }
@@ -708,7 +708,7 @@ NodeFromToken(struct expr_token *Token)
     case ET_MACRO:          *Node = MacroNode(Token->AsMacro); break;
     case ET_BEGIN_XENO_REF: *Node = StringNode(Token->AsXeno); break;
     case ET_CELL_REF:       *Node = CellNode(Token->AsCell); break;
-    InvalidDefaultCase;
+    default_unreachable;
     }
     return Node;
 }
@@ -724,9 +724,9 @@ SetAsNodeFrom(struct expr_node *Node, struct cell *Cell)
     case CELL_PRETYPED: Unreachable;
     case CELL_STRING:   *Node = StringNode(Cell->AsString); break;
     case CELL_NUMBER:   *Node = NumberNode(Cell->AsNumber); break;
-    case CELL_EXPR:     NotImplemented;
+    case CELL_EXPR:     not_implemented;
     case CELL_ERROR:    *Node = ErrorNode(Cell->AsError); break;
-    InvalidDefaultCase;
+    default_unreachable;
     }
 
     return Node;
@@ -1177,7 +1177,7 @@ MakeDocument(fd Dir, char *Path)
             case LINE_ROW:     Prefix = "ROW"; break;
             case LINE_COMMAND: Prefix = "COM"; break;
             case LINE_COMMENT: Prefix = "REM"; break;
-                            InvalidDefaultCase;
+            default_unreachable;
             }
             printf("%s%c", Prefix, FmtRowIdx < 0? '.': '!');
 #endif
@@ -1210,13 +1210,16 @@ MakeDocument(fd Dir, char *Path)
                             SetAsString(Cell, SaveStr(CellBuf));
                         }
                         break;
+
                     case CELL_EXPR:
                         SetAsExpr(Cell, SaveStr(CellBuf));
                         break;
+
                     case CELL_STRING:
                         SetAsString(Cell, SaveStr(CellBuf));
                         break;
-                        InvalidDefaultCase;
+
+                    default_unreachable;
                     }
 #if PREPRINT_ROWS
                     switch (Cell->Type) {
@@ -1226,7 +1229,7 @@ MakeDocument(fd Dir, char *Path)
                     case CELL_ERROR:  printf("<%s>", CellErrStr(Cell->AsError)); break;
                     default:
                         LogWarn("Preprint wants to print type %d", Cell->Type);
-                        InvalidCodePath;
+                        invalid_code_path;
                     }
 #endif
 
@@ -1282,7 +1285,7 @@ MakeDocument(fd Dir, char *Path)
                             ReserveColumn(Doc, ArgPos)->Sep = " │ ";
                         }
                         else {
-                            NotImplemented;
+                            not_implemented;
                         }
                     } break;
 
@@ -1525,7 +1528,7 @@ PrintNode(struct expr_node *Node, s32 Depth)
             break;
         default:
             LogError("cannot handle type %d", Node->Type);
-            NotImplemented;
+            not_implemented;
         }
     }
 }
@@ -1705,7 +1708,7 @@ AccumulateMathOp(f64 *Acc, enum expr_operator Op, struct expr_node *Node)
         case EN_OP_SUB: *Acc -= Node->AsNumber; break;
         case EN_OP_MUL: *Acc *= Node->AsNumber; break;
         case EN_OP_DIV: *Acc /= Node->AsNumber; break;
-        InvalidDefaultCase;
+        default_unreachable;
         }
         break;
 
@@ -1717,7 +1720,7 @@ AccumulateMathOp(f64 *Acc, enum expr_operator Op, struct expr_node *Node)
         case EN_OP_SUB: LogError("Cannot subtract with type %d", Node->Type); break;
         case EN_OP_MUL: LogError("Cannot multiply with type %d", Node->Type); break;
         case EN_OP_DIV: LogError("Cannot divide with type %d", Node->Type); break;
-        InvalidDefaultCase;
+        default_unreachable;
         }
         break;
     }
@@ -1766,7 +1769,7 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row, struc
     }
     else switch (Node->Type) {
     case EN_NULL:
-        NotImplemented;
+        not_implemented;
     case EN_ERROR:
     case EN_NUMBER:
     case EN_FUNC_IDENT:
@@ -1849,7 +1852,7 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row, struc
         }
     } break;
 
-    case EN_SUM_CONT: InvalidCodePath;
+    case EN_SUM_CONT: invalid_code_path;
 
     case EN_PROD: {
         if (!Node->AsList.Next) {
@@ -1874,7 +1877,7 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row, struc
         }
     } break;
 
-    case EN_PROD_CONT: InvalidCodePath;
+    case EN_PROD_CONT: invalid_code_path;
 
     case EN_LIST: {
         Assert(Node->AsList.This);
@@ -1900,7 +1903,7 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row, struc
         }
     } break;
 
-    case EN_LIST_CONT: InvalidCodePath;
+    case EN_LIST_CONT: invalid_code_path;
 
     case EN_FUNC: {
         struct expr_node Func, Arg;
@@ -2113,7 +2116,7 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row, struc
                     struct expr_node *List = &Arg;
                     Arg0 = List->AsList.This; List = List->AsList.Next;
                     Arg1 = List->AsList.This; List = List->AsList.Next;
-                    Assert(List == 0);
+                    Assert(!List);
 
                     if (Arg0->Type != EN_NUMBER) {
                         LogError("cell/2 arg 0 should be a number (got %d)", Arg1->Type);
@@ -2134,7 +2137,7 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row, struc
                     Arg0 = List->AsList.This; List = List->AsList.Next;
                     Arg1 = List->AsList.This; List = List->AsList.Next;
                     Arg2 = List->AsList.This; List = List->AsList.Next;
-                    Assert(List == 0);
+                    Assert(!List);
 
                     if (Arg0->Type != EN_STRING) {
                         LogError("cell/3 arg 0 should be a string (got %d)", Arg1->Type);
@@ -2169,7 +2172,7 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row, struc
                 Arg0 = List->AsList.This; List = List->AsList.Next;
                 Arg1 = List->AsList.This; List = List->AsList.Next;
                 Arg2 = List->AsList.This; List = List->AsList.Next;
-                Assert(List == 0);
+                Assert(!List);
                 if (Arg0->Type != EN_NUMBER) {
                     LogError("mask_sum/3 arg 0 should be a number");
                 }
@@ -2234,7 +2237,7 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row, struc
             }
             break;
 
-        InvalidDefaultCase;
+        default_unreachable;
         }
     } break;
 
@@ -2255,13 +2258,13 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row, struc
 
     default:
         LogError("Got unhandeled case %d", Node->Type);
-        NotImplemented;
+        not_implemented;
     }
 
     Assert(Out);
     if (!IsFinal(Out)) {
         LogWarn("Node was not final (type %d)", Out->Type);
-        NotImplemented;
+        not_implemented;
     }
     return Out;
 }
@@ -2298,7 +2301,7 @@ EvaluateCell(struct document *Doc, s32 Col, s32 Row)
                 switch (Token.Type) {
                 default:
                     LogError("Encountered unsupported type %d", Token.Type);
-                    NotImplemented;
+                    not_implemented;
 
                 case ET_LEFT_PAREN:     printf("("); break;
                 case ET_RIGHT_PAREN:    printf(")"); break;
@@ -2330,7 +2333,7 @@ EvaluateCell(struct document *Doc, s32 Col, s32 Row)
                     case EF_ROW:      printf("row/0"); break;
                     case EF_SIGN:     printf("sign/1"); break;
                     case EF_SUM:      printf("sum/1"); break;
-                    InvalidDefaultCase;
+                    default_unreachable;
                     }
                     break;
 
@@ -2497,7 +2500,7 @@ PrintDocument(struct document *Doc)
                 for (s32 It = 0; It < Column->Width; ++It) putchar('.');
                 printf("%s!", T(UL_END));
                 break;
-            InvalidDefaultCase;
+            default_unreachable;
             }
 # undef X
 # undef T
@@ -2510,8 +2513,8 @@ PrintDocument(struct document *Doc)
             case CELL_STRING:
                 printf("%-*s", Column->Width, Cell->AsString);
                 break;
-            case CELL_NUMBER:
-            {
+
+            case CELL_NUMBER: {
                 struct cell *TopCell = GetCell(Doc, Col, 0);
 
                 if (Cell->Fmt.Prcsn < TopCell->Fmt.Prcsn) {
@@ -2534,8 +2537,8 @@ PrintDocument(struct document *Doc)
                     printf("%'*.*f", Column->Width, Cell->Fmt.Prcsn,
                             Cell->AsNumber);
                 }
-                break;
-            }
+            } break;
+
             case CELL_EXPR:
                 printf("%-*s", Column->Width, Cell->AsString);
                 break;
@@ -2545,7 +2548,7 @@ PrintDocument(struct document *Doc)
             case CELL_NULL:
                 for (s32 It = 0; It < Column->Width; ++It) putchar(' ');
                 break;
-            InvalidDefaultCase;
+            default_unreachable;
             }
 #if USE_UNDERLINE
             if (Underline) printf(UL_END);
@@ -2615,7 +2618,7 @@ main(s32 ArgCount, char **Args)
             PrintDocument(Doc);
         }
     }
-    for (s32 Idx = 1; Idx < ArgCount; ++Idx) {
+    else for (s32 Idx = 1; Idx < ArgCount; ++Idx) {
         char *Path = Args[Idx];
 
         struct document *Doc = MakeDocument(AT_FDCWD, Path);

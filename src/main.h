@@ -38,11 +38,15 @@
 #define BRACKETED (BRACKET_CELLS || OVERDRAW_COL || OVERDRAW_ROW)
 
 /* generic things */
-#define Unreachable __builtin_unreachable()
-#define NotImplemented __builtin_trap()
-
-#define InvalidCodePath Unreachable
-#define InvalidDefaultCase default: InvalidCodePath
+#if DEBUG
+#define not_implemented __builtin_trap()
+#define invalid_code_path unreachable()
+#define default_unreachable default: unreachable()
+#else
+#define not_implemented
+#define invalid_code_path
+#define default_unreachable
+#endif
 
 #include <stdio.h>
 #include <errno.h>
@@ -79,7 +83,7 @@ typedef double f64;
 
 typedef int fd;
 
-/* put the cannary into its cage */
+/* put the canary into its cage */
 static_assert(sizeof (ptr) == sizeof (sptr));
 static_assert(sizeof (dptr) == sizeof (sptr));
 static_assert(sizeof (dptr) == sizeof (ptr));
@@ -87,9 +91,6 @@ static_assert(sizeof (umm) == sizeof (ptr));
 static_assert(sizeof (umm) == sizeof (smm));
 static_assert(sizeof (smm) == sizeof (dptr));
 
-#define fallthrough __attribute__((fallthrough))
-#define inline inline __attribute__((gnu_inline))
-#define noreturn _Noreturn
 #define atomic _Atomic
 
 #define STDIN_FILENO 0

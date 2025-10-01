@@ -13,7 +13,7 @@ LDLIBS  = -lpthread -lm $(shell pkg-config --libs $(libraries))
 
 override CPPFLAGS := $(CPPFLAGS) $(CPPDIRS)
 override LDFLAGS  := $(LDFLAGS) $(LDDIRS)
-base_CFLAGS       := -std=gnu2x $(CFLAGS) $(shell pkg-config --cflags $(libraries))
+base_CFLAGS       := -std=gnu2y $(CFLAGS) $(shell pkg-config --cflags $(libraries))
 
 sources = $(wildcard $(source_dir)/*.c)
 objects = $(patsubst $(source_dir)/%.c,$(build_dir)/%$o,$(sources))
