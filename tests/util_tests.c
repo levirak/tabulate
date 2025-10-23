@@ -1,4 +1,4 @@
-#include "main.h"
+#include "common.h"
 
 #include "util.h"
 
@@ -28,7 +28,8 @@ static char _MsgBuf[512];
 } while (0);
 
 
-char *powers_of_u8()
+char *
+PowersOfU8()
 {
 #define X(I,O) AssertEq(NextPow2_u8(I), O);
 #define EXPECTATIONS_U8 \
@@ -53,7 +54,8 @@ char *powers_of_u8()
     return 0;
 }
 
-char *powers_of_u16()
+char *
+PowersOfU16()
 {
 #define X(I,O) AssertEq(NextPow2_u16(I), O);
 #define EXPECTATIONS_U16 \
@@ -77,7 +79,8 @@ char *powers_of_u16()
     return 0;
 }
 
-char *powers_of_u32()
+char *
+PowersOfU32()
 {
 #define X(I,O) AssertEq(NextPow2_u32(I), O);
 #define EXPECTATIONS_U32 \
@@ -109,7 +112,8 @@ char *powers_of_u32()
     return 0;
 }
 
-char *powers_of_u64()
+char *
+PowersOfU64()
 {
 #define X(I,O) AssertEq(NextPow2_u64(I), O);
 #define EXPECTATIONS_U64 \
@@ -158,142 +162,31 @@ char *powers_of_u64()
 }
 
 
-char *CleanChar(char C)
+const char *
+CleanChar(char C)
 {
-    switch (C) {
-    case '\00':  return "'\\0'";
-    case '\01':  return "'\\1'";
-    case '\02':  return "'\\2'";
-    case '\03':  return "'\\3'";
-    case '\04':  return "'\\4'";
-    case '\05':  return "'\\5'";
-    case '\06':  return "'\\6'";
-    case '\07':  return "'\\a'";
-    case '\10':  return "'\\b'";
-    case '\11':  return "'\\t'";
-    case '\12':  return "'\\n'";
-    case '\13':  return "'\\v'";
-    case '\14':  return "'\\f'";
-    case '\15':  return "'\\r'";
-    case '\16':  return "'\\16'";
-    case '\17':  return "'\\17'";
-    case '\20':  return "'\\20'";
-    case '\21':  return "'\\21'";
-    case '\22':  return "'\\22'";
-    case '\23':  return "'\\23'";
-    case '\24':  return "'\\24'";
-    case '\25':  return "'\\25'";
-    case '\26':  return "'\\26'";
-    case '\27':  return "'\\27'";
-    case '\30':  return "'\\30'";
-    case '\31':  return "'\\31'";
-    case '\32':  return "'\\32'";
-    case '\33':  return "'\\33'";
-    case '\34':  return "'\\34'";
-    case '\35':  return "'\\35'";
-    case '\36':  return "'\\36'";
-    case '\37':  return "'\\37'";
-    case ' ':    return "' '";
-    case '!':    return "'!'";
-    case '"':    return "'\"'";
-    case '#':    return "'#'";
-    case '$':    return "'$'";
-    case '%':    return "'%'";
-    case '&':    return "'&'";
-    case '\'':   return "'\\''";
-    case '(':    return "'('";
-    case ')':    return "')'";
-    case '*':    return "'*'";
-    case '+':    return "'+'";
-    case ',':    return "','";
-    case '-':    return "'-'";
-    case '.':    return "'.'";
-    case '/':    return "'/'";
-    case '0':    return "'0'";
-    case '1':    return "'1'";
-    case '2':    return "'2'";
-    case '3':    return "'3'";
-    case '4':    return "'4'";
-    case '5':    return "'5'";
-    case '6':    return "'6'";
-    case '7':    return "'7'";
-    case '8':    return "'8'";
-    case '9':    return "'9'";
-    case ':':   return "':'";
-    case ';':    return "';'";
-    case '<':    return "'<'";
-    case '=':    return "'='";
-    case '>':    return "'>'";
-    case '?':    return "'?'";
-    case '@':    return "'@'";
-    case 'A':    return "'A'";
-    case 'B':    return "'B'";
-    case 'C':    return "'C'";
-    case 'D':    return "'D'";
-    case 'E':    return "'E'";
-    case 'F':    return "'F'";
-    case 'G':    return "'G'";
-    case 'H':    return "'H'";
-    case 'I':    return "'I'";
-    case 'J':    return "'J'";
-    case 'K':    return "'K'";
-    case 'L':    return "'L'";
-    case 'M':    return "'M'";
-    case 'N':    return "'N'";
-    case 'O':    return "'O'";
-    case 'P':    return "'P'";
-    case 'Q':    return "'Q'";
-    case 'R':    return "'R'";
-    case 'S':    return "'S'";
-    case 'T':    return "'T'";
-    case 'U':    return "'U'";
-    case 'V':    return "'V'";
-    case 'W':    return "'W'";
-    case 'X':    return "'X'";
-    case 'Y':    return "'Y'";
-    case 'Z':    return "'Z'";
-    case '[':    return "'['";
-    case '\\':   return "'\\\\'";
-    case ']':    return "']'";
-    case '^':    return "'^'";
-    case '_':    return "'_'";
-    case '`':    return "'`'";
-    case 'a':    return "'a'";
-    case 'b':    return "'b'";
-    case 'c':    return "'c'";
-    case 'd':    return "'d'";
-    case 'e':    return "'e'";
-    case 'f':    return "'f'";
-    case 'g':    return "'g'";
-    case 'h':    return "'h'";
-    case 'i':    return "'i'";
-    case 'j':    return "'j'";
-    case 'k':    return "'k'";
-    case 'l':    return "'l'";
-    case 'm':    return "'m'";
-    case 'n':    return "'n'";
-    case 'o':    return "'o'";
-    case 'p':    return "'p'";
-    case 'q':    return "'q'";
-    case 'r':    return "'r'";
-    case 's':    return "'s'";
-    case 't':    return "'t'";
-    case 'u':    return "'u'";
-    case 'v':    return "'v'";
-    case 'w':    return "'w'";
-    case 'x':    return "'x'";
-    case 'y':    return "'y'";
-    case 'z':    return "'z'";
-    case '{':    return "'{'";
-    case '|':    return "'|'";
-    case '}':    return "'}'";
-    case '~':    return "'~'";
-    case '\177': return "'\\177'";
-    InvalidDefaultCase;
-    }
+    return (constexpr char[0x100][3+1]){
+        "\\0",  "\\1",  "\\2",  "\\3",  "\\4",  "\\5",  "\\6",  "\\a",
+        "\\b",  "\\t",  "\\n",  "\\v",  "\\f",  "\\r",  "\\16", "\\17",
+        "\\20", "\\21", "\\22", "\\23", "\\24", "\\25", "\\26", "\\27",
+        "\\30", "\\31", "\\32", "\\33", "\\34", "\\35", "\\36", "\\37",
+        " ",    "!",    "\"",   "#",    "$",    "%",    "&",    "\\'",
+        "(",    ")",    "*",    "+",    ",",    "-",    ".",    "/",
+        "0",    "1",    "2",    "3",    "4",    "5",    "6",    "7",
+        "8",    "9",    ":",    ";",    "<",    "=",    ">",    "?",
+        "@",    "A",    "B",    "C",    "D",    "E",    "F",    "G",
+        "H",    "I",    "J",    "K",    "L",    "M",    "N",    "O",
+        "P",    "Q",    "R",    "S",    "T",    "U",    "V",    "W",
+        "X",    "Y",    "Z",    "[",    "\\\\", "]",    "^",    "_",
+        "`",    "a",    "b",    "c",    "d",    "e",    "f",    "g",
+        "h",    "i",    "j",    "k",    "l",    "m",    "n",    "o",
+        "p",    "q",    "r",    "s",    "t",    "u",    "v",    "w",
+        "x",    "y",    "z",    "{",    "|",    "}",    "~",    "\\177",
+    }[C & 0xff];
 }
 
-char *TestStr2f64(char *Str, f64 ExpectedRet, char ExpectedRhs)
+char *
+TestStr2f64(char *Str, f64 ExpectedRet, char ExpectedRhs)
 {
     char *Rhs, *Msg = 0;
     f64 Actual = Str2f64(Str, &Rhs);
@@ -305,7 +198,7 @@ char *TestStr2f64(char *Str, f64 ExpectedRet, char ExpectedRhs)
     }
     else if (*Rhs != ExpectedRhs) {
         snprintf(_MsgBuf, sizeof _MsgBuf,
-                "Str2f64(\"%s\" &Rhs) expected *Rhs == %s, but got *Rhs = %s",
+                "Str2f64(\"%s\" &Rhs) expected *Rhs == '%s', but got *Rhs = '%s'",
                 Str, CleanChar(ExpectedRhs), CleanChar(Actual));
         Msg = _MsgBuf;
     }
@@ -313,7 +206,8 @@ char *TestStr2f64(char *Str, f64 ExpectedRet, char ExpectedRhs)
     return Msg;
 }
 
-char *string_to_f64()
+char *
+StringToF64()
 {
 #define X(I,O,T) do { char *M = TestStr2f64(I,O,T); if (M) return M; } while (0)
     X("", 0, 0); /* NOTE: an edge case? */
@@ -329,7 +223,6 @@ char *string_to_f64()
 }
 
 
-
 s32
 main(s32 ArgCount, char **argv)
 {
@@ -341,11 +234,11 @@ main(s32 ArgCount, char **argv)
         char *Name;
     } Tests[] = {
 #define X(N) {N, #N}
-        X(powers_of_u8),
-        X(powers_of_u16),
-        X(powers_of_u32),
-        X(powers_of_u64),
-        X(string_to_f64),
+        X(PowersOfU8),
+        X(PowersOfU16),
+        X(PowersOfU32),
+        X(PowersOfU64),
+        X(StringToF64),
 #undef X
         0
     };

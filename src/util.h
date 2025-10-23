@@ -1,6 +1,5 @@
-#ifndef _util_h_
-#define _util_h_
-#include "main.h"
+#pragma once
+#include "common.h"
 
 #include <string.h>
 
@@ -23,5 +22,3 @@ u64 NextPow2_u64(u64);
 )((A))
 
 f64 Str2f64(char *Str, char **Rhs);
-
-#endif

@@ -1,4 +1,4 @@
-#include "main.h"
+#include "common.h"
 
 #include "logging.h"
 #include "mem.h"
@@ -15,7 +15,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <math.h>
+#include <tgmath.h>
 #include <time.h>
 
 /* constants */
@@ -27,7 +27,7 @@
 #define SUMMARY (-4)
 #define FOOT0 (-5) /* NOTE: must be lowest valued constant */
 
-static struct fmt_header DefaultHeader = DEFAULT_HEADER;
+static constexpr struct fmt_header DefaultHeader = DEFAULT_HEADER;
 
 enum expr_func {
     EF_NULL = 0,
@@ -46,13 +46,194 @@ enum expr_func {
     EF_NUMBER,
     EF_PCENT,
     EF_POW,
+    EF_ROUND,
     EF_ROW,
     EF_SIGN,
     EF_SUM,
+    EF_TRUNC,
 
     EXPR_FUNC_COUNT,
 };
 
+struct expr_func_map_entry {
+    char Name[15+1];
+    enum expr_func Func;
+};
+constexpr struct expr_func_map_entry ExprFuncMap[] = {
+    { "abs",      EF_ABS },
+    { "average",  EF_AVERAGE },
+    { "avg",      EF_AVERAGE },
+    { "bc",       EF_BODY_COL },
+    { "bodycol",  EF_BODY_COL },
+    { "bodyrow",  EF_BODY_COL }, /* depricated name */
+    { "br",       EF_BODY_COL }, /* depricated name */
+    { "ceil",     EF_CEIL },
+    { "cell",     EF_CELL },
+    { "cnt",      EF_COUNT },
+    { "col",      EF_COL },
+    { "count",    EF_COUNT },
+    { "floor",    EF_FLOOR },
+    { "mask_sum", EF_MASK_SUM },
+    { "max",      EF_MAX },
+    { "min",      EF_MIN },
+    { "number",   EF_NUMBER },
+    { "pcent",    EF_PCENT },
+    { "pow",      EF_POW },
+    { "round",    EF_ROUND },
+    { "row",      EF_ROW },
+    { "sign",     EF_SIGN },
+    { "sum",      EF_SUM },
+    { "trunc",    EF_TRUNC },
+};
+
+const struct expr_func_spec {
+    enum expr_func Func; /* for sanity checking */
+    char Name[15+1];
+    char ArityStr[7+1];
+    umm NumForms;
+    enum {
+        ARITY_INVALID = 0,
+        ARITY_SIMPLE,
+        ARITY_VARIADIC,
+    } FormType;
+    /* NOTE: it's assumed that only one form will match a given arity */
+    /* TODO(levirak): more robust overloading */
+    const struct expr_func_form {
+        s32 Arity;
+        enum expr_func_arg {
+            EFA_NULL = 0,
+
+            EFA_NUMBER = 1 << 0,
+            EFA_STRING = 1 << 1,
+            EFA_RANGE  = 1 << 2,
+
+            EFA_ANY = ~0,
+        } Arg[3];
+    } *Forms;
+} ExprFuncSpec[EXPR_FUNC_COUNT] = {
+    [EF_NULL] = {
+        EF_NULL, "NULLFUNC", "0",
+        0, ARITY_INVALID, nullptr,
+    },
+    [EF_ABS] = {
+        EF_ABS, "abs", "1",
+        1, ARITY_SIMPLE, (constexpr struct expr_func_form[1]){
+            { 1, { EFA_NUMBER } },
+        },
+    },
+    [EF_AVERAGE] = {
+        EF_AVERAGE, "average", "1",
+        1, ARITY_SIMPLE, (constexpr struct expr_func_form[1]){
+            { 1, { EFA_RANGE } },
+        },
+    },
+    [EF_BODY_COL] = {
+        EF_BODY_COL, "bodycol", "?",
+        2, ARITY_SIMPLE, (constexpr struct expr_func_form[2]){
+            { 0, {} },
+            { 1, { EFA_RANGE } },
+        },
+    },
+    [EF_CEIL] = {
+        EF_CEIL, "ceil", "1",
+        1, ARITY_SIMPLE, (constexpr struct expr_func_form[1]){
+            { 1, { EFA_NUMBER } },
+        },
+    },
+    [EF_CELL] = {
+        EF_CELL, "cell", "2,3",
+        2, ARITY_SIMPLE, (constexpr struct expr_func_form[2]){
+            { 2, { EFA_NUMBER, EFA_NUMBER } },
+            { 3, { EFA_STRING, EFA_NUMBER, EFA_NUMBER } },
+        },
+    },
+    [EF_COL] = {
+        EF_COL, "col", "0",
+        1, ARITY_SIMPLE, (constexpr struct expr_func_form[1]){
+            { 0, {} },
+        },
+    },
+    [EF_COUNT] = {
+        EF_COUNT, "count", "1",
+        1, ARITY_SIMPLE, (constexpr struct expr_func_form[1]){
+            { 1, { EFA_RANGE } },
+        },
+    },
+    [EF_FLOOR] = {
+        EF_FLOOR, "floor", "1",
+        1, ARITY_SIMPLE, (constexpr struct expr_func_form[1]){
+            { 1, { EFA_NUMBER } },
+        },
+    },
+    [EF_MASK_SUM] = {
+        EF_MASK_SUM, "mask_sum", "3",
+        1, ARITY_SIMPLE, (constexpr struct expr_func_form[1]){
+            { 3, { EFA_NUMBER, EFA_NUMBER | EFA_STRING, EFA_NUMBER } },
+        },
+    },
+    [EF_MAX] = {
+        EF_MAX, "max", "+",
+        1, ARITY_VARIADIC, (constexpr struct expr_func_form[1]){
+            { 1, { EFA_NUMBER | EFA_RANGE } },
+        },
+    },
+    [EF_MIN] = {
+        EF_MIN, "min", "+",
+        1, ARITY_VARIADIC, (constexpr struct expr_func_form[1]){
+            { 1, { EFA_NUMBER | EFA_RANGE } },
+        },
+    },
+    [EF_NUMBER] = {
+        EF_NUMBER, "number", "+",
+        1, ARITY_VARIADIC, (constexpr struct expr_func_form[1]){
+            { 1, { EFA_ANY } },
+        },
+    },
+    [EF_PCENT] = {
+        EF_PCENT, "pcent", "1",
+        1, ARITY_SIMPLE, (constexpr struct expr_func_form[1]){
+            { 1, { EFA_NUMBER } },
+        },
+    },
+    [EF_POW] = {
+        EF_POW, "pow", "2",
+        1, ARITY_SIMPLE, (constexpr struct expr_func_form[1]){
+            { 2, { EFA_NUMBER, EFA_NUMBER } },
+        },
+    },
+    [EF_ROUND] = {
+        EF_ROUND, "round", "1,2",
+        2, ARITY_SIMPLE, (constexpr struct expr_func_form[2]){
+            { 1, { EFA_NUMBER } },
+            { 2, { EFA_NUMBER, EFA_NUMBER } },
+        },
+    },
+    [EF_ROW] = {
+        EF_ROW, "row", "0",
+        1, ARITY_SIMPLE, (constexpr struct expr_func_form[1]){
+            { 0, {} },
+        },
+    },
+    [EF_SIGN] = {
+        EF_SIGN, "sign", "1",
+        1, ARITY_SIMPLE, (constexpr struct expr_func_form[1]){
+            { 1, { EFA_NUMBER } },
+        },
+    },
+    [EF_SUM] = {
+        EF_SUM, "sum", "+",
+        1, ARITY_VARIADIC, (constexpr struct expr_func_form[1]){
+            { 1, { EFA_NUMBER | EFA_RANGE } },
+        },
+    },
+    [EF_TRUNC] = {
+        EF_TRUNC, "trunc", "1,2",
+        2, ARITY_SIMPLE, (constexpr struct expr_func_form[2]){
+            { 1, { EFA_NUMBER } },
+            { 2, { EFA_NUMBER, EFA_NUMBER } },
+        },
+    },
+};
 
 struct expr_token {
     enum expr_token_type {
@@ -147,7 +328,7 @@ ReadLine(FILE *File, char *Buf, umm Sz)
 
 
 static struct fmt_header *
-MergeHeader(struct fmt_header *Dst, struct fmt_header *Src)
+MergeHeader(struct fmt_header *Dst, const struct fmt_header *Src)
 {
     if (!(Dst->SetMask & SET_ALIGN)) Dst->Align = Src->Align;
     if (!(Dst->SetMask & SET_PRCSN)) Dst->Prcsn = Src->Prcsn;
@@ -422,40 +603,12 @@ UngetExprToken(struct expr_lexer *State, struct expr_token *Token)
 }
 
 enum expr_func
-MatchFunc(char *Str)
+MatchFunc(const char *Str)
 {
-    static struct func_info {
-        enum expr_func Func;
-        char *Str;
-    } Functions[] = {
-        { EF_ABS,      "abs" },
-        { EF_AVERAGE,  "average" },
-        { EF_AVERAGE,  "avg" },
-        { EF_BODY_COL, "bc" },
-        { EF_BODY_COL, "bodycol" },
-        { EF_BODY_COL, "bodyrow" }, // TODO(levirak): depricated name
-        { EF_BODY_COL, "br" },      // TODO(levirak): depricated name
-        { EF_CEIL,     "ceil" },
-        { EF_CELL,     "cell" },
-        { EF_COL,      "col" },
-        { EF_COUNT,    "cnt" },
-        { EF_COUNT,    "count" },
-        { EF_FLOOR,    "floor" },
-        { EF_MASK_SUM, "mask_sum" },
-        { EF_MAX,      "max" },
-        { EF_MIN,      "min" },
-        { EF_NUMBER,   "number" },
-        { EF_PCENT,    "pcent" },
-        { EF_POW,      "pow" },
-        { EF_ROW,      "row" },
-        { EF_SIGN,     "sign" },
-        { EF_SUM,      "sum" },
-    };
-
-    for (s32 Idx = 0; Idx < sArrayCount(Functions); ++Idx) {
-        struct func_info *Info = Functions + Idx;
-        if (StrEq(Str, Info->Str)) {
-            return Info->Func;
+    for (s32 Idx = 1; Idx < sArrayCount(ExprFuncMap); ++Idx) {
+        auto It = ExprFuncMap + Idx;
+        if (StrEq(Str, It->Name)) {
+            return It->Func;
         }
     }
 
@@ -518,6 +671,7 @@ NextExprToken(struct expr_lexer *State, struct expr_token *Out)
             Out->Type = ET_BEGIN_XENO_REF;
             Out->AsXeno = SaveStr(State->Buf);
             break;
+
         case '}':
             ++State->Cur;
             Out->Type = ET_END_XENO_REF;
@@ -608,6 +762,7 @@ PeekExprToken(struct expr_lexer *State, struct expr_token *Out)
 
 enum expr_operator {
     EN_OP_NULL = 0,
+    EN_OP_SET,
 
     EN_OP_NEGATIVE,
 
@@ -641,7 +796,6 @@ struct expr_node {
     union {
         enum expr_error AsError;
         f64 AsNumber;
-        enum expr_func AsFunc;
         char *AsIdent;
         char *AsString;
         struct cell_ref AsCell;
@@ -658,6 +812,10 @@ struct expr_node {
             char *Reference;
         } AsXeno;
         struct {
+            enum expr_func Func;
+            struct expr_node *Args;
+        } AsFunc;
+        struct {
             struct expr_node *This;
             struct expr_node *Next;
             enum expr_operator Op;
@@ -667,7 +825,6 @@ struct expr_node {
 
 #define ErrorNode(V)     (struct expr_node){ EN_ERROR, .AsError = (V) }
 #define NumberNode(V)    (struct expr_node){ EN_NUMBER, .AsNumber = (V) }
-#define FuncNameNode(V)  (struct expr_node){ EN_FUNC_IDENT, .AsFunc = (V) }
 #define MacroNode(V)     (struct expr_node){ EN_MACRO, .AsIdent = (V) }
 #define StringNode(V)    (struct expr_node){ EN_STRING, .AsString = (V) }
 #define CellNode(V)      (struct expr_node){ EN_CELL, .AsCell = (V) }
@@ -676,6 +833,7 @@ struct expr_node {
 
 static inline struct expr_node *
 NextOf(struct expr_node *Node)
+[[gnu::nonnull]]
 {
     switch (Node->Type) {
     case EN_LIST:
@@ -688,6 +846,7 @@ NextOf(struct expr_node *Node)
 
 static inline struct expr_node *
 NodeOf(struct expr_node *Node)
+[[gnu::nonnull]]
 {
     switch (Node->Type) {
     case EN_LIST:
@@ -708,7 +867,6 @@ NodeFromToken(struct expr_token *Token)
     switch (Token->Type) {
     case ET_NUMBER:         *Node = NumberNode(Token->AsNumber); break;
     case ET_STRING:         *Node = StringNode(Token->AsString); break;
-    case ET_FUNC:           *Node = FuncNameNode(Token->AsFunc); break;
     case ET_MACRO:          *Node = MacroNode(Token->AsMacro); break;
     case ET_BEGIN_XENO_REF: *Node = StringNode(Token->AsXeno); break;
     case ET_CELL_REF:       *Node = CellNode(Token->AsCell); break;
@@ -819,7 +977,7 @@ ParseList(struct expr_lexer *Lexer)
 static struct expr_node *
 ParseFunc(struct expr_lexer *Lexer)
 {
-    struct expr_node *Node = 0, *Child = 0;
+    struct expr_node *Node = nullptr;
     struct expr_token Token;
 
     if (NextExprToken(Lexer, &Token) != ET_FUNC) {
@@ -827,28 +985,29 @@ ParseFunc(struct expr_lexer *Lexer)
         Assert(!Node);
     }
     else {
-        Child = NodeFromToken(&Token);
         *(Node = ReserveData(sizeof *Node)) = (struct expr_node){
-            EN_FUNC, .AsList = { Child, 0, 0 },
+            EN_FUNC, .AsFunc = { Token.AsFunc, nullptr },
         };
 
         switch (NextExprToken(Lexer, &Token)) {
-        case ET_LEFT_PAREN:
-            Child = ParseList(Lexer);
+        case ET_LEFT_PAREN: {
+            struct expr_node *Child = ParseList(Lexer);
             if (NextExprToken(Lexer, &Token) != ET_RIGHT_PAREN) {
                 LogError("Expected a ')' token");
-                Node = 0;
+                Node = nullptr;
             }
             else {
-                Node->AsList.Next = Child;
+                Node->AsFunc.Args = Child;
             }
-            break;
+        } break;
+        case ET_CELL_REF:
         case ET_BEGIN_XENO_REF:
         case ET_NUMBER:
         case ET_FUNC:
-        case ET_CELL_REF:
+        case ET_MACRO:
+            /* TODO(levirak): think harder about when I can omit the parens */
             UngetExprToken(Lexer, &Token);
-            Node->AsList.Next = ParseSum(Lexer);
+            Node->AsFunc.Args = ParseSum(Lexer);
             break;
         default:
             UngetExprToken(Lexer, &Token);
@@ -1056,7 +1215,7 @@ ParseSumCont(struct expr_lexer *Lexer)
     NextExprToken(Lexer, &Token);
     s32 Op = (Token.Type == ET_PLUS)? EN_OP_ADD: EN_OP_SUB;
     if (Token.Type != ET_PLUS && Token.Type != ET_MINUS) {
-        LogError("Expected a '+' or '-' toker");
+        LogError("Expected a '+' or '-' token");
     }
     else if (!(This = ParseProd(Lexer))) { /* nop */ }
     else {
@@ -1540,124 +1699,27 @@ PrintNode(struct expr_node *Node, s32 Depth)
 
 static enum expr_error EvaluateCell(struct document *, s32, s32);
 
-static enum expr_error
-SumRange(struct document *Doc, f64 *Out, struct cell_block *Range)
+static inline s32
+CellsEq(struct cell *A, struct cell *B)
 {
-    Assert(Doc);
-    Assert(Out);
-    Assert(Range);
-
-    enum expr_error Error = 0;
-    s32 FirstCol = Clamp(0, Range->FirstCol, Doc->Cols);
-    s32 FirstRow = Clamp(0, Range->FirstRow, Doc->Rows);
-    s32 LastCol = Clamp(0, Range->LastCol, Doc->Cols);
-    s32 LastRow = Clamp(0, Range->LastRow, Doc->Rows);
-
-    f64 Acc = 0;
-    for (s32 Col = FirstCol; Col <= LastCol; ++Col) {
-        for (s32 Row = FirstRow; Row <= LastRow; ++Row) {
-            EvaluateCell(Doc, Col, Row);
-            struct cell *Cell = GetCell(Doc, Col, Row);
-            if (Cell->Type == CELL_NUMBER) {
-                Acc += Cell->AsNumber;
-            }
-        }
+    if (!A || !B) {
+        return (!A && !B);
     }
-
-    *Out = Acc;
-    return Error;
-}
-
-static enum expr_error
-AverageRange(struct document *Doc, f64 *Out, struct cell_block *Range)
-{
-    Assert(Doc);
-    Assert(Out);
-    Assert(Range);
-
-    enum expr_error Error = 0;
-    s32 FirstCol = Clamp(0, Range->FirstCol, Doc->Cols);
-    s32 FirstRow = Clamp(0, Range->FirstRow, Doc->Rows);
-    s32 LastCol = Clamp(0, Range->LastCol, Doc->Cols);
-    s32 LastRow = Clamp(0, Range->LastRow, Doc->Rows);
-
-    f64 Sum = 0;
-    f64 Count = 0;
-    for (s32 Col = FirstCol; Col <= LastCol; ++Col) {
-        for (s32 Row = FirstRow; Row <= LastRow; ++Row) {
-            EvaluateCell(Doc, Col, Row);
-            struct cell *Cell = GetCell(Doc, Col, Row);
-            if (Cell->Type == CELL_NUMBER) {
-                Sum += Cell->AsNumber;
-                Count += 1;
-            }
-        }
+    else if (A->Type != B->Type) {
+        return false;
     }
+    else switch (A->Type) {
+    case CELL_STRING:
+        return StrEq(A->AsString, B->AsString);
 
-    *Out = Count? Sum / Count: 0;
-    return Error;
-}
+    case CELL_NUMBER:
+        /* TODO(levirak): fuzzy eq? */
+        return A->AsNumber == B->AsNumber;
 
-static f64
-CountRange(struct document *Doc, f64 *Out, struct cell_block *Range)
-{
-    Assert(Doc);
-    Assert(Out);
-    Assert(Range);
-
-    enum expr_error Error = 0;
-    s32 FirstCol = Clamp(0, Range->FirstCol, Doc->Cols);
-    s32 FirstRow = Clamp(0, Range->FirstRow, Doc->Rows);
-    s32 LastCol = Clamp(0, Range->LastCol, Doc->Cols);
-    s32 LastRow = Clamp(0, Range->LastRow, Doc->Rows);
-
-    f64 Acc = 0;
-    for (s32 Col = FirstCol; Col <= LastCol; ++Col) {
-        for (s32 Row = FirstRow; Row <= LastRow; ++Row) {
-            EvaluateCell(Doc, Col, Row);
-            Acc += (GetCell(Doc, Col, Row)->Type == CELL_NUMBER);
-        }
+    default:
+        not_implemented;
+        return false;
     }
-
-    *Out = Acc;
-    return Error;
-}
-
-static enum expr_error
-MaskSum(struct document *Doc, f64 *Out, s32 MaskCol, struct expr_node *Proto, s32 SelCol)
-{
-    Assert(Doc);
-    Assert(Out);
-    Assert(Proto);
-
-    enum expr_error Error = 0;
-
-    s32 First = Doc->FirstBodyRow;
-    s32 OnePastLast = Min(Doc->FirstFootRow, Doc->Rows);
-
-    Assert(First >= 0);
-    Assert(OnePastLast <= Doc->Rows);
-
-    f64 Acc = 0;
-    for (s32 Row = First; Row < OnePastLast; ++Row) {
-        EvaluateCell(Doc, MaskCol, Row);
-        struct cell *Mask = GetCell(Doc, MaskCol, Row);
-        bool Accept = 0
-                || (Mask->Type == CELL_NUMBER && Proto->Type == EN_NUMBER && Mask->AsNumber == Proto->AsNumber)
-                || (Mask->Type == CELL_STRING && Proto->Type == EN_STRING && StrEq(Mask->AsString, Proto->AsString))
-                ;
-
-        if (Accept) {
-            EvaluateCell(Doc, SelCol, Row);
-            struct cell * Trgt = GetCell(Doc, SelCol, Row);
-            if (Trgt->Type == CELL_NUMBER) {
-                Acc += Trgt->AsNumber;
-            }
-        }
-    }
-
-    *Out = Acc;
-    return Error;
 }
 
 static bool
@@ -1672,33 +1734,35 @@ IsFinal(struct expr_node *Node)
     case EN_STRING:
     case EN_CELL:
     case EN_RANGE:
-        return 1;
+        return true;
     case EN_LIST:
     case EN_LIST_CONT:
         for (struct expr_node *Cur = Node; Cur; Cur = Cur->AsList.Next) {
             if (!IsFinal(Cur->AsList.This)) return 0;
         }
-        return 1;
+        return true;
     default:
-        return 0;
+        return false;
     }
 }
 
 static enum expr_error
 AccumulateMathOp(f64 *Acc, enum expr_operator Op, struct expr_node *Node)
+[[gnu::nonnull]]
 {
-    Assert(Acc);
     enum expr_error Error = 0;
 
-    switch (NotNull(Node)->Type) {
+    switch (Node->Type) {
     case EN_STRING:
         if (StrEq(Node->AsString, "")) {
-            /* treat as equivalent to 0, For add/sub, this has no effect. For
-             * mul/div, this sets the accumulator to 0 */
+            /* treat as equivalent to 0 */
             switch (Op) {
+            case EN_OP_SET: *Acc = 0; break;
+            case EN_OP_ADD: /* nop */ break;
+            case EN_OP_SUB: /* nop */ break;
             case EN_OP_MUL: *Acc = 0; break;
-            case EN_OP_DIV: *Acc = 0; break;
-            default: break;
+            case EN_OP_DIV: *Acc = NAN; break;
+            default: invalid_code_path;
             }
         }
         else {
@@ -1708,23 +1772,28 @@ AccumulateMathOp(f64 *Acc, enum expr_operator Op, struct expr_node *Node)
 
     case EN_NUMBER:
         switch (Op) {
+        case EN_OP_SET: *Acc  = Node->AsNumber; break;
         case EN_OP_ADD: *Acc += Node->AsNumber; break;
         case EN_OP_SUB: *Acc -= Node->AsNumber; break;
         case EN_OP_MUL: *Acc *= Node->AsNumber; break;
         case EN_OP_DIV: *Acc /= Node->AsNumber; break;
-        default_unreachable;
+        default: invalid_code_path;
         }
         break;
 
-    case EN_ERROR: Error = Node->AsError; break;
+    case EN_ERROR:
+        Error = Node->AsError;
+        break;
+
     default:
         Error = ERROR_TYPE;
         switch (Op) {
+        case EN_OP_SET: LogError("Cannot set with type %d", Node->Type); break;
         case EN_OP_ADD: LogError("Cannot add with type %d", Node->Type); break;
         case EN_OP_SUB: LogError("Cannot subtract with type %d", Node->Type); break;
         case EN_OP_MUL: LogError("Cannot multiply with type %d", Node->Type); break;
         case EN_OP_DIV: LogError("Cannot divide with type %d", Node->Type); break;
-        default_unreachable;
+        default: invalid_code_path;
         }
         break;
     }
@@ -1749,19 +1818,44 @@ EvaluateIntoNode(struct document *Doc, s32 Col, s32 Row, struct expr_node *Node)
     }
 }
 
-static s32
-ArgListLen(struct expr_node *List)
+static inline s32
+ArgListLen(struct expr_node *Node)
+[[gnu::nonnull]]
 {
-    s32 Count = 0;
-    if (List) {
-        Assert(List->Type == EN_LIST);
-        ++Count;
-        for (List = List->AsList.Next; List; List = List->AsList.Next) {
-            Assert(List->Type == EN_LIST_CONT);
+    s32 Count = Node->Type? 1: 0;
+    if (Node->Type == EN_LIST) {
+        for (Node = Node->AsList.Next; Node; Node = Node->AsList.Next) {
+            Assert(Node->Type == EN_LIST_CONT);
             ++Count;
         }
     }
     return Count;
+}
+
+static inline bool
+MatchArgType(enum expr_func_arg Spec, enum expr_node_type Node)
+{
+    return (!Spec && !Node)
+        || ((Spec & EFA_NUMBER) && (Node == EN_NUMBER))
+        || ((Spec & EFA_STRING) && (Node == EN_STRING))
+        || ((Spec & EFA_RANGE)  && (Node == EN_RANGE))
+        ;
+}
+
+static inline const char *
+ArgTypeStr(enum expr_func_arg Spec)
+{
+    constexpr s32 Mask = EFA_NUMBER | EFA_STRING | EFA_RANGE;
+    return ((const char *[Mask + 1]){
+        [EFA_NULL] = "NULL",
+        [EFA_NUMBER] = "a number",
+        [EFA_STRING] = "a string",
+        [EFA_NUMBER | EFA_STRING] = "a number or string",
+        [EFA_RANGE] = "a range",
+        [EFA_NUMBER | EFA_RANGE] = "a number or range",
+        [EFA_STRING | EFA_RANGE] = "a string or range",
+        [EFA_NUMBER | EFA_STRING | EFA_RANGE] = "a number, string or range",
+    })[Spec & Mask];
 }
 
 static struct expr_node *
@@ -1833,7 +1927,8 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row, struc
         }
     } break;
 
-    case EN_SUM: {
+    case EN_SUM:
+    case EN_PROD: {
         if (!Node->AsList.Next) {
             ReduceNode(Doc, Node->AsList.This, Col, Row, Out);
         }
@@ -1841,13 +1936,11 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row, struc
             f64 Acc = 0;
 
             ReduceNode(Doc, Node->AsList.This, Col, Row, Out);
-            enum expr_error Error = AccumulateMathOp(&Acc, EN_OP_ADD, Out);
+            enum expr_error Error = AccumulateMathOp(&Acc, EN_OP_SET, Out);
 
-            for (struct expr_node *Cur = Node->AsList.Next;
-                    Cur && !Error;
-                    Cur = Cur->AsList.Next)
-            {
-                Assert(Cur->Type == EN_SUM_CONT);
+            struct expr_node *Cur;
+            for (Cur = Node->AsList.Next; Cur && !Error; Cur = Cur->AsList.Next) {
+                Assert(Cur->Type == EN_SUM_CONT || Cur->Type == EN_PROD_CONT);
                 ReduceNode(Doc, Cur->AsList.This, Col, Row, Out);
                 Error = AccumulateMathOp(&Acc, Cur->AsList.Op, Out);
             }
@@ -1857,30 +1950,6 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row, struc
     } break;
 
     case EN_SUM_CONT: invalid_code_path;
-
-    case EN_PROD: {
-        if (!Node->AsList.Next) {
-            ReduceNode(Doc, Node->AsList.This, Col, Row, Out);
-        }
-        else {
-            f64 Acc = 1;
-
-            ReduceNode(Doc, Node->AsList.This, Col, Row, Out);
-            enum expr_error Error = AccumulateMathOp(&Acc, EN_OP_MUL, Out);
-
-            for (struct expr_node *Cur = Node->AsList.Next;
-                    Cur && !Error;
-                    Cur = Cur->AsList.Next)
-            {
-                Assert(Cur->Type == EN_PROD_CONT);
-                ReduceNode(Doc, Cur->AsList.This, Col, Row, Out);
-                Error = AccumulateMathOp(&Acc, Cur->AsList.Op, Out);
-            }
-
-            *Out = Error? ErrorNode(Error): NumberNode(Acc);
-        }
-    } break;
-
     case EN_PROD_CONT: invalid_code_path;
 
     case EN_LIST: {
@@ -1889,20 +1958,24 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row, struc
             ReduceNode(Doc, Node->AsList.This, Col, Row, Out);
         }
         else {
-            *Out = *Node;
+            struct expr_node *CurIn = Node, *CurOut = Out;
+            constexpr umm NodeSz = sizeof *CurIn->AsList.This;
 
-            struct expr_node *Cur = Out;
-            Cur->AsList.This = ReduceNode(Doc, Cur->AsList.This, Col, Row,
-                            ReserveData(sizeof *Cur));
+            Assert(CurIn->AsList.Op == EN_OP_NULL);
+            *CurOut = (struct expr_node){ EN_LIST, .AsList = {
+                ReduceNode(Doc, CurIn->AsList.This, Col, Row, ReserveData(NodeSz)),
+            }};
 
-            while (Cur->AsList.Next) {
-                struct expr_node *New = ReserveData(sizeof *New);
-                *New = *Cur->AsList.Next;
-                Cur->AsList.Next = New;
-                Cur = Cur->AsList.Next;
+            for (CurIn = CurIn->AsList.Next; CurIn; CurIn = CurIn->AsList.Next) {
+                Assert(CurIn->Type == EN_LIST_CONT);
+                Assert(CurIn->AsList.This);
+                Assert(CurIn->AsList.Op == EN_OP_NULL);
 
-                Cur->AsList.This = ReduceNode(Doc, Cur->AsList.This, Col, Row,
-                        ReserveData(sizeof *Cur));
+                struct expr_node *NewLink = ReserveData(sizeof *NewLink);
+                *NewLink = (struct expr_node){ EN_LIST_CONT, .AsList = {
+                    ReduceNode(Doc, CurIn->AsList.This, Col, Row, ReserveData(NodeSz)),
+                }};
+                CurOut = (CurOut->AsList.Next = NewLink);
             }
         }
     } break;
@@ -1910,377 +1983,447 @@ ReduceNode(struct document *Doc, struct expr_node *Node, s32 Col, s32 Row, struc
     case EN_LIST_CONT: invalid_code_path;
 
     case EN_FUNC: {
-        struct expr_node Func, Arg;
-        ReduceNode(Doc, Node->AsList.This, Col, Row, &Func);
-        ReduceNode(Doc, Node->AsList.Next, Col, Row, &Arg);
+        enum expr_func Func = Node->AsFunc.Func;
 
-        Assert(Func.Type == EN_FUNC_IDENT);
-        /* TODO(levirak): find a way to collapse this switch to something data
-         * driven */
-        switch (Func.AsFunc) {
-        case EF_BODY_COL:
-            if (!Arg.Type) {
-                *Out = (struct expr_node){ EN_RANGE, .AsRange = {
-                    Col, Doc->FirstBodyRow,
-                    Col, Doc->FirstFootRow - 1,
-                }};
-            }
-            else if (Arg.Type != EN_NUMBER) {
-                LogError("bodycol/1 takes a number");
-                *Out = ErrorNode(ERROR_TYPE);
-            }
-            else {
-                *Out = (struct expr_node){ EN_RANGE, .AsRange = {
-                    (s32)Arg.AsNumber, Doc->FirstBodyRow,
-                    (s32)Arg.AsNumber, Doc->FirstFootRow - 1,
-                }};
-            }
-            break;
+        struct expr_node Arg;
+        ReduceNode(Doc, Node->AsFunc.Args, Col, Row, &Arg);
 
-        case EF_SUM:
-            if (!Arg.Type) {
-                LogError("sum/1 takes one argument");
+        if (!(0 <= Func && Func < EXPR_FUNC_COUNT)) {
+            LogError("func #%d has no spec", Func);
+            *Out = ErrorNode(ERROR_IMPL);
+        }
+        else {
+            const struct expr_func_spec *Spec = &ExprFuncSpec[Func];
+            Assert(Spec->Func == Func);
+
+            s32 Arity = ArgListLen(&Arg);
+
+            const struct expr_func_form *Form = nullptr;
+            for (umm Idx = 0; Idx < Spec->NumForms; ++Idx) {
+                const struct expr_func_form *Candidate = Spec->Forms + Idx;
+
+                switch (Spec->FormType) {
+                case ARITY_INVALID: invalid_code_path; break;
+                case ARITY_SIMPLE:
+                    if (Arity == Candidate->Arity) {
+                        Form = Candidate;
+                    }
+                    break;
+                case ARITY_VARIADIC:
+                    if (Arity >= Candidate->Arity) {
+                        Form = Candidate;
+                    }
+                    break;
+                }
+            }
+
+            if (!Form) {
+                LogError("%s/%s cannot take %d arguments",
+                        Spec->Name, Spec->ArityStr, Arity);
                 *Out = ErrorNode(ERROR_ARGC);
             }
-            else if (Arg.Type != EN_RANGE) {
-                LogError("sum/1 takes a range");
-                *Out = ErrorNode(ERROR_TYPE);
-            }
             else {
-                enum expr_error Err;
-                f64 Sum = 0;
-                if ((Err = SumRange(Doc, &Sum, &Arg.AsRange))) {
-                    *Out = ErrorNode(Err);
+                bool ValidTypes = true; /* optimistic */
+
+                if (!Arg.Type) {
+                    /* no arguments to check */
+                    Assert(Arity == 0);
+                    Assert(Form->Arity == 0);
                 }
                 else {
-                    *Out = NumberNode(Sum);
-                }
-            }
-            break;
+                    s32 Idx = 1;
+                    for (struct expr_node *List = &Arg; List; ++Idx, List = NextOf(List)) {
+                        struct expr_node *This = NodeOf(List);
 
-        case EF_AVERAGE:
-            if (!Arg.Type) {
-                LogError("average/1 takes one argument");
-                *Out = ErrorNode(ERROR_ARGC);
-            }
-            else if (Arg.Type != EN_RANGE) {
-                LogError("average/1 takes a range");
-                *Out = ErrorNode(ERROR_TYPE);
-            }
-            else {
-                enum expr_error Err;
-                f64 Average = 0;
-                if ((Err = AverageRange(Doc, &Average, &Arg.AsRange))) {
-                    *Out = ErrorNode(Err);
-                }
-                else {
-                    *Out = NumberNode(Average);
-                }
-            }
-            break;
-
-        case EF_COUNT:
-            if (!Arg.Type) {
-                LogError("count/1 takes one argument");
-                *Out = ErrorNode(ERROR_ARGC);
-            }
-            else if (Arg.Type != EN_RANGE) {
-                LogError("count/1 takes a range");
-                *Out = ErrorNode(ERROR_TYPE);
-            }
-            else {
-                Assert(Arg.Type == EN_RANGE);
-                enum expr_error Err;
-                f64 Count = 0;
-
-                if ((Err = CountRange(Doc, &Count, &Arg.AsRange))) {
-                    *Out = ErrorNode(Err);
-                }
-                else {
-                    *Out = NumberNode(Count);
-                }
-            }
-            break;
-
-        case EF_ABS:
-            if (!Arg.Type) {
-                LogError("abs/1 takes one argument");
-                *Out = ErrorNode(ERROR_ARGC);
-            }
-            else if (Arg.Type != EN_NUMBER) {
-                LogError("abs/1 takes a number");
-                *Out = ErrorNode(ERROR_TYPE);
-            }
-            else {
-                Assert(Arg.Type == EN_NUMBER);
-                f64 Number = Arg.AsNumber;
-                *Out = NumberNode(Number < 0? -Number: Number);
-            }
-            break;
-
-        case EF_SIGN:
-            if (!Arg.Type) {
-                LogError("sign/1 takes one argument");
-                *Out = ErrorNode(ERROR_ARGC);
-            }
-            else if (Arg.Type != EN_NUMBER) {
-                LogError("sign/1 takes a number (got %d)", Arg.Type);
-                *Out = ErrorNode(ERROR_TYPE);
-            }
-            else {
-                Assert(Arg.Type == EN_NUMBER);
-                f64 Number = Arg.AsNumber;
-                *Out = NumberNode((Number > 0)? 1: (Number < 0)? -1: 0);
-            }
-            break;
-
-        case EF_FLOOR:
-            if (!Arg.Type) {
-                LogError("floor/1 takes one argument");
-                *Out = ErrorNode(ERROR_ARGC);
-            }
-            else if (Arg.Type != EN_NUMBER) {
-                LogError("floor/1 takes a number (got %d)", Arg.Type);
-                *Out = ErrorNode(ERROR_TYPE);
-            }
-            else {
-                Assert(Arg.Type == EN_NUMBER);
-                *Out = NumberNode(floor(Arg.AsNumber));
-            }
-            break;
-
-        case EF_CEIL:
-            if (!Arg.Type) {
-                LogError("ceil/1 takes one argument");
-                *Out = ErrorNode(ERROR_ARGC);
-            }
-            else if (Arg.Type != EN_NUMBER) {
-                LogError("ceil/1 takes a number (got %d)", Arg.Type);
-                *Out = ErrorNode(ERROR_TYPE);
-            }
-            else {
-                Assert(Arg.Type == EN_NUMBER);
-                *Out = NumberNode(ceil(Arg.AsNumber));
-            }
-            break;
-
-        case EF_NUMBER:
-            if (!Arg.Type) {
-                LogError("number/+ takes at least one argument");
-                *Out = ErrorNode(ERROR_ARGC);
-            }
-            else {
-                f64 Number = 0;
-                for (struct expr_node *It = &Arg; It; It = NextOf(It)) {
-                    struct expr_node *This = NodeOf(It);
-
-                    if (This->Type == EN_NUMBER) {
-                        if (isnan(This->AsNumber)) { /* ignored */ }
-                        else if (isinf(This->AsNumber)) { /* ignored */ }
-                        else {
-                            Number = This->AsNumber;
-                            break; /* early out of this loop */
+                        auto ExpectedType = Form->Arg[Min(Idx, Form->Arity) - 1];
+                        if (!MatchArgType(ExpectedType, This->Type)) {
+                            ValidTypes = false;
+                            LogError("%s/%d arg %d expects %s",
+                                    Spec->Name, Arity, Idx,
+                                    ArgTypeStr(ExpectedType));
                         }
                     }
                 }
-                *Out = NumberNode(Number);
-            }
-            break;
 
-        case EF_COL:
-            if (Arg.Type) {
-                LogError("col/0 takes no arguments");
-                *Out = ErrorNode(ERROR_ARGC);
-            }
-            else {
-                *Out = NumberNode(Col);
-            }
-            break;
+                if (!ValidTypes) {
+                    *Out = ErrorNode(ERROR_TYPE);
+                }
+                else switch (Func) {
+                case EF_ABS: {
+                    Assert(Arity == 1);
+                    Assert(Arg.Type == EN_NUMBER);
+                    *Out = NumberNode(fabs(Arg.AsNumber));
+                } break;
 
-        case EF_ROW:
-            if (Arg.Type) {
-                LogError("row/0 takes no arguments");
-                *Out = ErrorNode(ERROR_ARGC);
-            }
-            else {
-                *Out = NumberNode(Row);
-            }
-            break;
+                case EF_AVERAGE: {
+                    Assert(Arity == 1);
+                    Assert(Arg.Type == EN_RANGE);
 
-        case EF_CELL:
-            if (Arg.Type != EN_LIST) {
-                LogError("cell/2,3 takes two or three arguments");
-                *Out = ErrorNode(ERROR_ARGC);
-            }
-            else {
-                s32 NumArgs = ArgListLen(&Arg);
-                if (NumArgs == 2) {
-                    struct expr_node *Arg0, *Arg1;
+                    s32 FirstCol = Clamp(0, Arg.AsRange.FirstCol, Doc->Cols);
+                    s32 FirstRow = Clamp(0, Arg.AsRange.FirstRow, Doc->Rows);
+                    s32 LastCol = Clamp(0, Arg.AsRange.LastCol, Doc->Cols);
+                    s32 LastRow = Clamp(0, Arg.AsRange.LastRow, Doc->Rows);
 
-                    struct expr_node *List = &Arg;
-                    Arg0 = List->AsList.This; List = List->AsList.Next;
-                    Arg1 = List->AsList.This; List = List->AsList.Next;
-                    Assert(!List);
-
-                    if (Arg0->Type != EN_NUMBER) {
-                        LogError("cell/2 arg 0 should be a number (got %d)", Arg1->Type);
-                        *Out = ErrorNode(ERROR_TYPE);
+                    f64 Sum = 0;
+                    f64 Count = 0;
+                    for (s32 C = FirstCol; C <= LastCol; ++C) {
+                        for (s32 R = FirstRow; R <= LastRow; ++R) {
+                            EvaluateCell(Doc, C, R);
+                            struct cell *Cell = GetCell(Doc, C, R);
+                            if (Cell->Type == CELL_NUMBER) {
+                                Sum += Cell->AsNumber;
+                                Count += 1;
+                            }
+                        }
                     }
-                    else if (Arg1->Type != EN_NUMBER) {
-                        LogError("cell/2 arg 1 should be a number (got %d)", Arg1->Type);
-                        *Out = ErrorNode(ERROR_TYPE);
+
+                    *Out = NumberNode(Count? Sum / Count: 0);
+                } break;
+
+                case EF_BODY_COL: {
+                    if (Arity == 0) {
+                        *Out = (struct expr_node){ EN_RANGE, .AsRange = {
+                            Col, Doc->FirstBodyRow,
+                            Col, Doc->FirstFootRow - 1,
+                        }};
+                    }
+                    else if (Arity == 1) {
+                        Assert(Arg.Type == EN_RANGE);
+                        *Out = (struct expr_node){ EN_RANGE, .AsRange = {
+                            (s32)Arg.AsNumber, Doc->FirstBodyRow,
+                            (s32)Arg.AsNumber, Doc->FirstFootRow - 1,
+                        }};
                     }
                     else {
+                        invalid_code_path;
+                    }
+                } break;
+
+                case EF_CEIL: {
+                    Assert(Arity == 1);
+                    Assert(Arg.Type == EN_NUMBER);
+                    *Out = NumberNode(ceil(Arg.AsNumber));
+                } break;
+
+                case EF_CELL: {
+                    struct expr_node *List = &Arg;
+                    if (Arity == 2) {
+                        struct expr_node *Arg0 = NodeOf(List); List = NextOf(List);
+                        struct expr_node *Arg1 = NodeOf(List); List = NextOf(List);
+                        Assert(!List);
+
+                        Assert(Arg0->Type == EN_NUMBER);
+                        Assert(Arg1->Type == EN_NUMBER);
                         *Out = CellNode2(Arg0->AsNumber, Arg1->AsNumber);
                     }
-                }
-                else if (NumArgs == 3) {
-                    struct expr_node *Arg0, *Arg1, *Arg2;
+                    else if (Arity == 3) {
+                        struct expr_node *Arg0 = NodeOf(List); List = NextOf(List);
+                        struct expr_node *Arg1 = NodeOf(List); List = NextOf(List);
+                        struct expr_node *Arg2 = NodeOf(List); List = NextOf(List);
+                        Assert(!List);
 
-                    struct expr_node *List = &Arg;
-                    Arg0 = List->AsList.This; List = List->AsList.Next;
-                    Arg1 = List->AsList.This; List = List->AsList.Next;
-                    Arg2 = List->AsList.This; List = List->AsList.Next;
-                    Assert(!List);
-
-                    if (Arg0->Type != EN_STRING) {
-                        LogError("cell/3 arg 0 should be a string (got %d)", Arg1->Type);
-                        *Out = ErrorNode(ERROR_TYPE);
-                    }
-                    else if (Arg1->Type != EN_NUMBER) {
-                        LogError("cell/3 arg 1 should be a number (got %d)", Arg1->Type);
-                        *Out = ErrorNode(ERROR_TYPE);
-                    }
-                    else if (Arg1->Type != EN_NUMBER) {
-                        LogError("cell/3 arg 2 should be a number (got %d)", Arg1->Type);
-                        *Out = ErrorNode(ERROR_TYPE);
-                    }
-                    else {
+                        Assert(Arg0->Type == EN_STRING);
+                        Assert(Arg1->Type == EN_NUMBER);
+                        Assert(Arg1->Type == EN_NUMBER);
                         struct expr_node XenoNode = XenoNode2(Arg0->AsString, Arg1->AsNumber, Arg2->AsNumber);
                         ReduceNode(Doc, &XenoNode, Col, Row, Out);
                     }
-                }
-                else {
-                    LogError("cell/2,3 takes two or three arguments");
-                }
-            }
-            break;
+                    else {
+                        invalid_code_path;
+                    }
+                } break;
 
-        case EF_MASK_SUM:
-            if (Arg.Type != EN_LIST || ArgListLen(&Arg) != 3) {
-                LogError("mask_sum/3 takes three arguments");
-            }
-            else {
-                struct expr_node *Arg0, *Arg1, *Arg2;
-                struct expr_node *List = &Arg;
-                Arg0 = List->AsList.This; List = List->AsList.Next;
-                Arg1 = List->AsList.This; List = List->AsList.Next;
-                Arg2 = List->AsList.This; List = List->AsList.Next;
-                Assert(!List);
-                if (Arg0->Type != EN_NUMBER) {
-                    LogError("mask_sum/3 arg 0 should be a number");
-                }
-                if (Arg1->Type != EN_NUMBER && Arg1->Type != EN_STRING) {
-                    LogError("mask_sum/3 arg 1 should be a number or string (got %d)", Arg1->Type);
-                }
-                else if (Arg2->Type != EN_NUMBER) {
-                    LogError("mask_sum/3 arg 2 should be a number");
-                }
-                else {
-                    enum expr_error Err;
-                    f64 Sum = 0;
-                    if ((Err = MaskSum(Doc, &Sum, Arg0->AsNumber, Arg1, Arg2->AsNumber))) {
-                        *Out = ErrorNode(Err);
+                case EF_COL: {
+                    Assert(Arity == 1);
+                    *Out = NumberNode(Col);
+                } break;
+
+                case EF_COUNT: {
+                    Assert(Arity == 1);
+                    Assert(Arg.Type == EN_RANGE);
+
+                    s32 FirstCol = Clamp(0, Arg.AsRange.FirstCol, Doc->Cols);
+                    s32 FirstRow = Clamp(0, Arg.AsRange.FirstRow, Doc->Rows);
+                    s32 LastCol = Clamp(0, Arg.AsRange.LastCol, Doc->Cols);
+                    s32 LastRow = Clamp(0, Arg.AsRange.LastRow, Doc->Rows);
+
+                    f64 Acc = 0;
+                    for (s32 C = FirstCol; C <= LastCol; ++C) {
+                        for (s32 R = FirstRow; R <= LastRow; ++R) {
+                            EvaluateCell(Doc, C, R);
+                            Acc += (GetCell(Doc, C, R)->Type == CELL_NUMBER);
+                        }
+                    }
+
+                    *Out = NumberNode(Acc);
+                } break;
+
+                case EF_FLOOR: {
+                    Assert(Arity == 1);
+                    Assert(Arg.Type == EN_NUMBER);
+                    *Out = NumberNode(floor(Arg.AsNumber));
+                } break;
+
+                case EF_MASK_SUM: {
+                    Assert(Arity == 3);
+                    struct expr_node *List = &Arg;
+                    struct expr_node *Arg0 = NodeOf(List); List = NextOf(List);
+                    struct expr_node *Arg1 = NodeOf(List); List = NextOf(List);
+                    struct expr_node *Arg2 = NodeOf(List); List = NextOf(List);
+                    Assert(!List);
+
+                    Assert(Arg0->Type == EN_NUMBER);
+                    Assert(Arg1->Type == EN_NUMBER || Arg1->Type == EN_STRING);
+                    Assert(Arg2->Type == EN_NUMBER);
+
+                    struct cell Proto;
+                    s32 TestC = Arg0->AsNumber;
+                    SetCellFromNode(&Proto, Arg1);
+                    s32 TrgtC = Arg2->AsNumber;
+
+                    s32 First = Doc->FirstBodyRow;
+                    s32 OnePastLast = Min(Doc->FirstFootRow, Doc->Rows);
+
+                    Assert(First >= 0);
+                    Assert(OnePastLast <= Doc->Rows);
+
+                    f64 Acc = 0;
+                    for (s32 R = First; R < OnePastLast; ++R) {
+                        EvaluateCell(Doc, TestC, R);
+                        if (CellsEq(&Proto, GetCell(Doc, TestC, R))) {
+                            EvaluateCell(Doc, TrgtC, R);
+                            struct cell *Trgt = GetCell(Doc, TrgtC, R);
+                            if (Trgt->Type == CELL_NUMBER) {
+                                Acc += Trgt->AsNumber;
+                            }
+                        }
+                    }
+
+                    *Out = NumberNode(Acc);
+                } break;
+
+                case EF_MAX: {
+                    bool Any = false;
+                    f64 Number = -INFINITY;
+                    for (struct expr_node *List = &Arg; List; List = NextOf(List)) {
+                        struct expr_node *This = NodeOf(List);
+
+                        if (This->Type == EN_NUMBER) {
+                            Number = Max(Number, This->AsNumber);
+                            Any = true;
+                        }
+                        else if (This->Type == EN_RANGE) {
+                            auto Range = &This->AsRange;
+                            s32 FirstCol = Clamp(0, Range->FirstCol, Doc->Cols);
+                            s32 FirstRow = Clamp(0, Range->FirstRow, Doc->Rows);
+                            s32 LastCol = Clamp(0, Range->LastCol, Doc->Cols);
+                            s32 LastRow = Clamp(0, Range->LastRow, Doc->Rows);
+
+                            for (s32 C = FirstCol; C <= LastCol; ++C) {
+                                for (s32 R = FirstRow; R <= LastRow; ++R) {
+                                    EvaluateCell(Doc, C, R);
+                                    struct cell *Cell = GetCell(Doc, C, R);
+                                    if (Cell->Type == CELL_NUMBER) {
+                                        Number = Max(Number, Cell->AsNumber);
+                                        Any = true;
+                                    }
+                                }
+                            }
+                        }
+                        else {
+                            invalid_code_path;
+                        }
+                    }
+                    *Out = NumberNode(Any? Number: 0);
+                } break;
+
+                case EF_MIN: {
+                    bool Any = false;
+                    f64 Number = INFINITY;
+                    for (struct expr_node *List = &Arg; List; List = NextOf(List)) {
+                        struct expr_node *This = NodeOf(List);
+
+                        if (This->Type == EN_NUMBER) {
+                            Number = Min(Number, This->AsNumber);
+                            Any = true;
+                        }
+                        else if (This->Type == EN_RANGE) {
+                            auto Range = &This->AsRange;
+                            s32 FirstCol = Clamp(0, Range->FirstCol, Doc->Cols);
+                            s32 FirstRow = Clamp(0, Range->FirstRow, Doc->Rows);
+                            s32 LastCol = Clamp(0, Range->LastCol, Doc->Cols);
+                            s32 LastRow = Clamp(0, Range->LastRow, Doc->Rows);
+
+                            for (s32 C = FirstCol; C <= LastCol; ++C) {
+                                for (s32 R = FirstRow; R <= LastRow; ++R) {
+                                    EvaluateCell(Doc, C, R);
+                                    struct cell *Cell = GetCell(Doc, C, R);
+                                    if (Cell->Type == CELL_NUMBER) {
+                                        Number = Min(Number, Cell->AsNumber);
+                                        Any = true;
+                                    }
+                                }
+                            }
+                        }
+                        else {
+                            invalid_code_path;
+                        }
+                    }
+                    *Out = NumberNode(Any? Number: 0);
+                } break;
+
+                case EF_NUMBER: {
+                    f64 Number = 0;
+                    for (struct expr_node *List = &Arg; List; List = NextOf(List)) {
+                        struct expr_node *This = NodeOf(List);
+
+                        if (This->Type == EN_NUMBER) {
+                            if (isnan(This->AsNumber)) { /* ignored */ }
+                            else if (isinf(This->AsNumber)) { /* ignored */ }
+                            else {
+                                Number = This->AsNumber;
+                                break; /* early out of this loop */
+                            }
+                        }
+                    }
+                    *Out = NumberNode(Number);
+                } break;
+
+                case EF_PCENT: {
+                    Assert(Arity == 1);
+                    Assert(Arg.Type == EN_NUMBER);
+                    char Buf[32];
+                    snprintf(Buf, sizeof Buf, "%0.2f%%", 100*Arg.AsNumber);
+                    /* TODO(levirak): is this leaking? */
+                    *Out = StringNode(SaveStr(Buf));
+                } break;
+
+                case EF_POW: {
+                    Assert(Arity == 2);
+
+                    struct expr_node *List = &Arg;
+                    struct expr_node *Arg0 = NodeOf(List); List = NextOf(List);
+                    struct expr_node *Arg1 = NodeOf(List); List = NextOf(List);
+                    Assert(!List);
+
+                    Assert(Arg0->Type == EN_NUMBER);
+                    Assert(Arg1->Type == EN_NUMBER);
+                    *Out = NumberNode(pow(Arg0->AsNumber, Arg1->AsNumber));
+                } break;
+
+                case EF_ROUND: {
+                    f64 Number = 0;
+                    f64 Prcsn = 0;
+
+                    if (Arity == 1) {
+                        Assert(Arg.Type == EN_NUMBER);
+
+                        struct fmt_header Fmt = GetCell(Doc, Col, 0)->Fmt;
+                        MergeHeader(&Fmt, &GetCell(Doc, Col, Row)->Fmt);
+                        MergeHeader(&Fmt, &DefaultHeader);
+                        Number = Arg.AsNumber;
+                        Prcsn = Fmt.Prcsn;
+                    }
+                    else if (Arity == 2) {
+                        struct expr_node *List = &Arg;
+                        struct expr_node *Arg0 = NodeOf(List); List = NextOf(List);
+                        struct expr_node *Arg1 = NodeOf(List); List = NextOf(List);
+                        Assert(!List);
+
+                        Assert(Arg0->Type == EN_NUMBER);
+                        Assert(Arg1->Type == EN_NUMBER);
+                        Number = Arg0->AsNumber;
+                        Prcsn = Arg1->AsNumber;
                     }
                     else {
-                        *Out = NumberNode(Sum);
+                        invalid_code_path;
                     }
-                }
-            }
-            break;
 
-        case EF_MAX:
-            if (!Arg.Type) {
-                LogError("max/+ takes at least one argument");
-                *Out = ErrorNode(ERROR_ARGC);
-            }
-            else {
-                bool Any = false;
-                f64 Number = -INFINITY;
-                for (struct expr_node *It = &Arg; It; It = NextOf(It)) {
-                    struct expr_node *This = NodeOf(It);
+                    f64 Mul10 = pow(10, Prcsn);
+                    *Out = NumberNode(round(Mul10 * Number) / Mul10);
+                } break;
 
-                    if (This->Type == EN_NUMBER) {
-                        Number = Max(Number, This->AsNumber);
-                        Any = true;
+                case EF_ROW: {
+                    Assert(Arity == 0);
+                    *Out = NumberNode(Row);
+                } break;
+
+                case EF_SIGN: {
+                    Assert(Arity == 1);
+                    Assert(Arg.Type == EN_NUMBER);
+                    f64 Number = Arg.AsNumber;
+                    *Out = NumberNode((Number > 0)? 1: (Number < 0)? -1: 0);
+                } break;
+
+                case EF_SUM: {
+                    f64 Acc = 0;
+                    for (struct expr_node *List = &Arg; List; List = NextOf(List)) {
+                        struct expr_node *This = NodeOf(List);
+
+                        if (This->Type == EN_NUMBER) {
+                            Acc += This->AsNumber;
+                        }
+                        else if (This->Type == EN_RANGE) {
+                            auto Range = &This->AsRange;
+                            s32 FirstCol = Clamp(0, Range->FirstCol, Doc->Cols);
+                            s32 FirstRow = Clamp(0, Range->FirstRow, Doc->Rows);
+                            s32 LastCol = Clamp(0, Range->LastCol, Doc->Cols);
+                            s32 LastRow = Clamp(0, Range->LastRow, Doc->Rows);
+
+                            for (s32 C = FirstCol; C <= LastCol; ++C) {
+                                for (s32 R = FirstRow; R <= LastRow; ++R) {
+                                    EvaluateCell(Doc, C, R);
+                                    struct cell *Cell = GetCell(Doc, C, R);
+                                    if (Cell->Type == CELL_NUMBER) {
+                                        Acc += Cell->AsNumber;
+                                    }
+                                }
+                            }
+                        }
+                        else {
+                            invalid_code_path;
+                        }
                     }
-                    /* TODO(levirak): handle EN_RANGE? */
-                }
-                *Out = NumberNode(Any? Number: 0);
-            }
-            break;
+                    *Out = NumberNode(Acc);
+                } break;
 
-        case EF_MIN:
-            if (!Arg.Type) {
-                LogError("min/+ takes at least one argument");
-                *Out = ErrorNode(ERROR_ARGC);
-            }
-            else {
-                bool Any = false;
-                f64 Number = INFINITY;
-                for (struct expr_node *It = &Arg; It; It = NextOf(It)) {
-                    struct expr_node *This = NodeOf(It);
+                case EF_TRUNC: {
+                    f64 Number = 0;
+                    f64 Prcsn = 0;
 
-                    if (This->Type == EN_NUMBER) {
-                        Number = Min(Number, This->AsNumber);
-                        Any = true;
+                    if (Arity == 1) {
+                        Assert(Arg.Type == EN_NUMBER);
+
+                        struct fmt_header Fmt = GetCell(Doc, Col, 0)->Fmt;
+                        MergeHeader(&Fmt, &GetCell(Doc, Col, Row)->Fmt);
+                        MergeHeader(&Fmt, &DefaultHeader);
+                        Number = Arg.AsNumber;
+                        Prcsn = Fmt.Prcsn;
                     }
-                    /* TODO(levirak): handle EN_RANGE? */
-                }
-                *Out = NumberNode(Any? Number: 0);
-            }
-            break;
+                    else if (Arity == 2) {
+                        struct expr_node *List = &Arg;
+                        struct expr_node *Arg0 = NodeOf(List); List = NextOf(List);
+                        struct expr_node *Arg1 = NodeOf(List); List = NextOf(List);
+                        Assert(!List);
 
-        case EF_POW:
-            if (Arg.Type != EN_LIST || ArgListLen(&Arg) != 2) {
-                LogError("pow/2 takes two arguments");
-            }
-            else {
-                struct expr_node *Arg0, *Arg1;
-                struct expr_node *List = &Arg;
-                Arg0 = List->AsList.This; List = List->AsList.Next;
-                Arg1 = List->AsList.This; List = List->AsList.Next;
-                Assert(List == nullptr);
-                if (Arg0->Type != EN_NUMBER) {
-                    LogError("pow/2 arg 0 should be a number");
-                }
-                if (Arg1->Type != EN_NUMBER) {
-                    LogError("pow/2 arg 1 should be a number");
-                }
-                else {
-                    *Out = NumberNode(pow(Arg0->AsNumber, Arg1->AsNumber));
-                }
-            }
-            break;
+                        Assert(Arg0->Type == EN_NUMBER);
+                        Assert(Arg1->Type == EN_NUMBER);
+                        Number = Arg0->AsNumber;
+                        Prcsn = Arg1->AsNumber;
+                    }
+                    else {
+                        invalid_code_path;
+                    }
 
-        case EF_PCENT:
-            if (!Arg.Type) {
-                LogError("pcent/1 takes one argument");
-                *Out = ErrorNode(ERROR_ARGC);
-            }
-            else if (Arg.Type != EN_NUMBER) {
-                LogError("pcent/1 takes a number");
-                *Out = ErrorNode(ERROR_TYPE);
-            }
-            else {
-                Assert(Arg.Type == EN_NUMBER);
-                char Buf[32];
-                snprintf(Buf, sizeof Buf, "%0.2f%%", 100*Arg.AsNumber);
-                *Out = StringNode(SaveStr(Buf)); /* TODO(levirak): is this leaking? */
-            }
-            break;
+                    f64 Mul10 = pow(10, Prcsn);
+                    *Out = NumberNode(trunc(Mul10 * Number) / Mul10);
+                } break;
 
-        default_unreachable;
+                default:
+                    *Out = ErrorNode(ERROR_IMPL);
+                    break;
+                }
+            }
         }
     } break;
 
@@ -2360,23 +2503,8 @@ EvaluateCell(struct document *Doc, s32 Col, s32 Row)
                 case ET_MACRO:          printf("!%s", Token.AsMacro); break;
 
                 case ET_FUNC:
-                    switch(Token.AsFunc) {
-                    case EF_ABS:      printf("abs/1"); break;
-                    case EF_AVERAGE:  printf("average/1"); break;
-                    case EF_BODY_COL: printf("bodycol/0,1"); break;
-                    case EF_CEIL:     printf("ceil/1"); break;
-                    case EF_CELL:     printf("cell/2,3"); break;
-                    case EF_COL:      printf("col/0"); break;
-                    case EF_COUNT:    printf("count/1"); break;
-                    case EF_FLOOR:    printf("floor/1"); break;
-                    case EF_MASK_SUM: printf("mask_sum/3"); break;
-                    case EF_MAX:      printf("max/+"); break;
-                    case EF_MIN:      printf("min/+"); break;
-                    case EF_NUMBER:   printf("number/+"); break;
-                    case EF_ROW:      printf("row/0"); break;
-                    case EF_SIGN:     printf("sign/1"); break;
-                    case EF_SUM:      printf("sum/1"); break;
-                    default_unreachable;
+                    if (0 <= Token.AsFunc && Token.AsFunc < sArrayCount(ExprFuncCanonical)) {
+                        printf("%s", ExprFuncCanonical[Token.AsFunc]);
                     }
                     break;
 
@@ -2455,15 +2583,11 @@ PrintDocument(struct document *Doc)
     Assert(Doc);
 
     FOREACH_COL(Doc, Col) {
-        struct cell *TopCell = GetCell(Doc, Col, 0);
-        Assert(TopCell);
-
-        struct fmt_header Fmt = TopCell->Fmt;
+        struct fmt_header Fmt = GetCell(Doc, Col, 0)->Fmt;
         MergeHeader(&Fmt, &DefaultHeader);
 
         FOREACH_ROW(Doc, Row) {
-            struct cell *Cell = GetCell(Doc, Col, Row);
-            MergeHeader(&Cell->Fmt, &Fmt);
+            MergeHeader(&GetCell(Doc, Col, Row)->Fmt, &Fmt);
         }
     }
 

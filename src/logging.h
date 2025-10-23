@@ -1,6 +1,5 @@
-#ifndef _logging_h_
-#define _logging_h_
-#include "main.h"
+#pragma once
+#include "common.h"
 
 __attribute__((format (printf, 1, 2)))
 s32 Log(char *Fmt, ...);
@@ -39,6 +38,4 @@ char *ErrName(s32 Error);
 #   define NotImplemented ({ LogAssert("Not Implemented"); abort(); })
 #   undef Unreachable
 #   define Unreachable ({ LogAssert("Unreachable"); abort(); })
-#endif
-
 #endif

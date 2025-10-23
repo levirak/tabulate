@@ -1,6 +1,5 @@
-#ifndef _mem_h_
-#define _mem_h_
-#include "main.h"
+#pragma once
+#include "common.h"
 
 struct cell_ref {
     s32 Col, Row;
@@ -33,7 +32,7 @@ struct column {
     char *Sep; // ignored for first column
 };
 static_assert(sizeof (struct column) == 16);
-#define DEFAULT_COLUMN ((struct column){ DEFAULT_CELL_WIDTH, COLUMN_SEPERATOR })
+#define DEFAULT_COLUMN ((const struct column){ DEFAULT_CELL_WIDTH, COLUMN_SEPERATOR })
 
 enum expr_error {
     ERROR_SUCCESS = 0,
@@ -139,5 +138,3 @@ void WipeAllMem(void);
 void ReleaseAllMem(void);
 
 void DumpMemInfo(enum page_categories, char *Path);
-
-#endif

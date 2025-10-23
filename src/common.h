@@ -1,5 +1,4 @@
-#ifndef __main_h__
-#define __main_h__
+#pragma once
 
 #ifdef NDEBUG
 #define DEBUG 0
@@ -55,7 +54,7 @@
 
 #define static_assert(...) _Static_assert(__VA_ARGS__)
 #define ArrayCount(A) (sizeof A / sizeof *A)
-#define sArrayCount(A) ((s32)ArrayCount(A))
+#define sArrayCount(A) ((smm)ArrayCount(A))
 
 #include <stdint.h>
 typedef int8_t  s8;
@@ -96,5 +95,3 @@ static_assert(sizeof (smm) == sizeof (dptr));
 #define STDIN_FILENO 0
 #define STDOUT_FILENO 1
 #define STDERR_FILENO 2
-
-#endif
