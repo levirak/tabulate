@@ -36,5 +36,5 @@ I usually write for the most recent version of GNU C because I usually have a
 newer `gcc` installed. On top of that, I write in a personal dialect of C that
 I don't let get too alien. As a taste of that dialect, I use `s32` in place of
 `int` and `u64` in place of `unsigned long`, and I have added the keyword
-`InvalidCodePath` as a debug trap. All additions I write with are placed in
-[`main.h`](src/main.h), which I include in every source file.
+`invalid_code_path` as a debug trap. All additions I write with are placed in
+[`common.h`](src/common.h), which I include in every source file.
